@@ -1,0 +1,7 @@
+requests
+supabase
+opencv-python-headless
+numpy
+faiss-cpu
+datasets
+huggingface-hub
