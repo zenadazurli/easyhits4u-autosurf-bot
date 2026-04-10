@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# app.py - Login + Autosurf per EasyHits4U con rilogin automatico e rotazione chiavi
+# app.py - Login + Autosurf per EasyHits4U con stabilizzazione sessione
 
 import os
 import time
@@ -19,7 +19,7 @@ DIM = 64
 REQUEST_TIMEOUT = 15
 ERRORI_DIR = "/tmp/errori"
 HEALTH_CHECK_PORT = int(os.environ.get('PORT', 10000))
-MAX_CONSECUTIVE_FAILURES = 3
+MAX_CONSECUTIVE_FAILURES = 5
 
 # Credenziali EasyHits4U
 EASYHITS_EMAIL = "sandrominori50+uiszuzoqatr@gmail.com"
@@ -171,6 +171,11 @@ def do_login(api_key):
     final_cookies = session.cookies.get_dict()
     if 'user_id' in final_cookies:
         log(f"   ✅ Login OK! user_id: {final_cookies['user_id']}")
+        # Aggiungi header standard per le richieste successive
+        session.headers.update({
+            'Referer': 'https://www.easyhits4u.com/member/',
+            'X-Requested-With': 'XMLHttpRequest'
+        })
         return session
     return None
 
@@ -185,7 +190,7 @@ def load_dataset_hf():
         class_names = dataset.features['y'].names
         classes_fast = {i: name for i, name in enumerate(class_names)}
         
-        log("🔧 Costruzione indice FAISS (FlatL2, senza addestramento)...")
+        log("🔧 Costruzione indice FAISS (FlatL2)...")
         X_list = []
         batch_size = 500
         for i in range(0, len(dataset), batch_size):
@@ -194,7 +199,6 @@ def load_dataset_hf():
         X_all = np.vstack(X_list)
         log(f"📊 Vettori caricati: {X_all.shape}")
         
-        # Usa IndexFlatL2 (ricerca brute-force, più stabile)
         index = faiss.IndexFlatL2(vector_dim)
         index.add(X_all)
         log(f"✅ Indice FAISS creato con {index.ntotal} vettori")
@@ -303,20 +307,34 @@ def salva_errore(qpic, img, picmap, labels, chosen_idx, motivo, urlid=None):
         json.dump(metadata, f, indent=2)
     log(f"📁 Errore salvato in {folder}")
 
-# ================ SURF LOOP CON RILOGIN AUTOMATICO =====================
+# ================ SURF LOOP CON STABILIZZAZIONE =====================
 def surf_loop(api_key, initial_session):
     session = initial_session
     consecutive_failures = 0
     captcha_counter = 0
 
+    # Stabilizzazione iniziale: visita la dashboard e attendi
+    log("🌐 Stabilizzazione sessione...")
+    try:
+        session.get("https://www.easyhits4u.com/member/", verify=False, timeout=15)
+        time.sleep(5)
+        session.get("https://www.easyhits4u.com/surf/", verify=False, timeout=15)
+        time.sleep(3)
+    except Exception as e:
+        log(f"⚠️ Errore durante stabilizzazione: {e}")
+
     while True:
         try:
+            # Ping alla homepage per mantenere sessione
+            session.get("https://www.easyhits4u.com", verify=False, timeout=10)
+            time.sleep(1)
+
             r = session.post(
                 "https://www.easyhits4u.com/surf/?ajax=1&try=1",
                 verify=False, timeout=REQUEST_TIMEOUT
             )
             if r.status_code != 200:
-                log(f"⚠️ Status {r.status_code} - Cookie scaduto o errore server")
+                log(f"⚠️ Status {r.status_code} - cookie scaduto?")
                 consecutive_failures += 1
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                     log(f"❌ Troppi fallimenti consecutivi ({consecutive_failures}), esco.")
@@ -325,9 +343,9 @@ def surf_loop(api_key, initial_session):
                 new_session = do_login(api_key)
                 if new_session:
                     session = new_session
-                    time.sleep(2)
-                    session.get("https://www.easyhits4u.com", verify=False, timeout=10)
-                    time.sleep(1)
+                    # Ristabilizza
+                    session.get("https://www.easyhits4u.com/member/", verify=False, timeout=15)
+                    time.sleep(5)
                     continue
                 else:
                     log("❌ Rilogin fallito, esco.")
@@ -340,22 +358,13 @@ def surf_loop(api_key, initial_session):
             picmap = data.get("picmap", [])
 
             if not urlid or not qpic or not picmap or len(picmap) < 5:
-                log("⚠️ Dati incompleti (cookie scaduto?) - richiedo rilogin")
+                log("⚠️ Dati incompleti, attendo e riprovo...")
                 consecutive_failures += 1
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                     log(f"❌ Troppi fallimenti consecutivi ({consecutive_failures}), esco.")
                     break
-                log(f"🔄 Tentativo di rilogin (fallimenti={consecutive_failures})...")
-                new_session = do_login(api_key)
-                if new_session:
-                    session = new_session
-                    time.sleep(2)
-                    session.get("https://www.easyhits4u.com", verify=False, timeout=10)
-                    time.sleep(1)
-                    continue
-                else:
-                    log("❌ Rilogin fallito, esco.")
-                    break
+                time.sleep(10)
+                continue
 
             consecutive_failures = 0
 
@@ -381,16 +390,8 @@ def surf_loop(api_key, initial_session):
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                     log("Troppi errori di riconoscimento consecutivi, esco.")
                     break
-                log("🔄 Tentativo di rilogin dopo errore riconoscimento...")
-                new_session = do_login(api_key)
-                if new_session:
-                    session = new_session
-                    time.sleep(2)
-                    session.get("https://www.easyhits4u.com", verify=False, timeout=10)
-                    time.sleep(1)
-                    continue
-                else:
-                    break
+                time.sleep(5)
+                continue
 
             time.sleep(seconds)
             word = picmap[chosen_idx]["value"]
@@ -401,22 +402,14 @@ def surf_loop(api_key, initial_session):
             )
             resp_json = resp.json()
             if resp_json.get("warning") == "wrong_choice":
-                log("❌ Wrong choice - salvo errore e provo a riloginare")
+                log("❌ Wrong choice - salvo errore")
                 salva_errore(qpic, img, picmap, labels, chosen_idx, "wrong_choice", urlid)
                 consecutive_failures += 1
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                     log("Troppi wrong choice consecutivi, esco.")
                     break
-                log("🔄 Tentativo di rilogin dopo wrong choice...")
-                new_session = do_login(api_key)
-                if new_session:
-                    session = new_session
-                    time.sleep(2)
-                    session.get("https://www.easyhits4u.com", verify=False, timeout=10)
-                    time.sleep(1)
-                    continue
-                else:
-                    break
+                time.sleep(5)
+                continue
 
             captcha_counter += 1
             log(f"✅ OK - indice {chosen_idx} - Totale captcha: {captcha_counter}")
@@ -431,23 +424,14 @@ def surf_loop(api_key, initial_session):
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                 log("Troppe eccezioni consecutive, esco.")
                 break
-            log("Tentativo di rilogin...")
-            new_session = do_login(api_key)
-            if new_session:
-                session = new_session
-                time.sleep(2)
-                session.get("https://www.easyhits4u.com", verify=False, timeout=10)
-                time.sleep(1)
-                continue
-            else:
-                break
+            time.sleep(10)
 
     log("🏁 Surf loop terminato")
 
 # ================ MAIN =====================
 def main():
     log("=" * 50)
-    log("🚀 EasyHits4U Bot - Login + Autosurf con rilogin automatico")
+    log("🚀 EasyHits4U Bot - Login + Autosurf con stabilizzazione")
     log("=" * 50)
 
     max_keys_to_try = 5
@@ -472,7 +456,6 @@ def main():
         else:
             log(f"❌ Login fallito, marco chiave come broken")
             release_key(api_key, 'broken')
-            # continua con la prossima chiave
 
     log("❌ Nessuna chiave ha funzionato dopo {max_keys_to_try} tentativi")
 
