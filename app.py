@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# app.py - Login + Autosurf con Browserless BQL (usando le chiavi che funzionano)
+# app.py - Login (con BQL) + Autosurf (solo requests)
 
 import requests
 import json
@@ -23,7 +23,7 @@ EASYHITS_PASSWORD = "DDnmVV45!!"
 REFERER_URL = "https://www.easyhits4u.com/?ref=nicolacaporale"
 BROWSERLESS_URL = "https://production-sfo.browserless.io/chrome/bql"
 
-# ==================== CHIAVI VALIDE (quelle che funzionano) ====================
+# ==================== CHIAVI VALIDE (QUELLE CHE FUNZIONANO) ====================
 VALID_KEYS = [
     "2UFyHOdxsID23VMa0518a22c6b683ea3c11c1bdca148d5381",
     "2UIAf0U41Twctlr77ecbfa2545692634758496b2eb88a170c",
@@ -95,7 +95,7 @@ vector_dim = 33
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ==================== FUNZIONI IDENTICHE AL REPOSITORY DI LOGIN ====================
+# ==================== LOGIN (BQL) ====================
 def get_cf_token(api_key):
     query = """
     mutation {
@@ -125,7 +125,7 @@ def get_cf_token(api_key):
             return token
         return None
     except Exception as e:
-        log(f"   ❌ Errore token: {e}")
+        log(f"   ❌ Errore: {e}")
         return None
 
 def login_with_token(token):
@@ -149,22 +149,8 @@ def login_with_token(token):
     final_cookies = session.cookies.get_dict()
     
     if 'user_id' in final_cookies:
-        sesids = final_cookies.get('sesids', 'NON TROVATO')
-        log(f"   ✅ Login OK! user_id: {final_cookies['user_id']}, sesids: {sesids}")
-        if sesids != 'NON TROVATO':
-            return session
-        else:
-            log(f"   ⚠️ sesids non ricevuto, provo a forzare con GET /member/")
-            # Forzatura: visita dashboard
-            session.get("https://www.easyhits4u.com/member/", verify=False, timeout=15)
-            time.sleep(2)
-            final_cookies2 = session.cookies.get_dict()
-            if 'sesids' in final_cookies2:
-                log(f"   ✅ Forzatura riuscita! sesids: {final_cookies2['sesids']}")
-                return session
-            else:
-                log(f"   ❌ sesids ancora mancante")
-                return None
+        log(f"   ✅ Login OK! user_id: {final_cookies['user_id']}, sesids: {final_cookies.get('sesids', 'NON TROVATO')}")
+        return session
     return None
 
 # ==================== DATASET ====================
@@ -202,7 +188,7 @@ def centra_figura(image):
         return cv2.resize(image, (DIM, DIM))
     cnt = max(contours, key=cv2.contourArea)
     x, y, w, h = cv2.boundingRect(cnt)
-    crop = image[y:y+h, x:x+w]
+    crop = image[y:y+h, x:x+w)
     return cv2.resize(crop, (DIM, DIM))
 
 def estrai_descrittori(img):
@@ -286,7 +272,7 @@ def salva_errore(qpic, img, picmap, labels, chosen_idx, motivo, urlid=None):
         json.dump(metadata, f, indent=2)
     log(f"📁 Errore salvato in {folder}")
 
-# ==================== SURF LOOP (senza GET iniziale a /surf/) ====================
+# ==================== SURF LOOP (senza GET iniziale) ====================
 def surf_loop(session):
     consecutive_failures = 0
     captcha_counter = 0
@@ -387,7 +373,7 @@ def surf_loop(session):
 # ==================== MAIN ====================
 def main():
     log("=" * 50)
-    log("🚀 LOGIN + AUTOSURF (con chiavi funzionanti e forzatura sesids)")
+    log("🚀 LOGIN + AUTOSURF (BQL, solo chiavi funzionanti)")
     log("=" * 50)
     
     if not load_dataset_hf():
@@ -404,9 +390,14 @@ def main():
         
         session = login_with_token(token)
         if session:
-            log("✅ Login riuscito! Avvio surf loop...")
-            surf_loop(session)
-            log("🔄 Surf loop terminato, provo altra chiave...")
+            # Verifica se sesids è presente
+            if 'sesids' in session.cookies.get_dict():
+                log("✅ Login riuscito con sesids! Avvio surf loop...")
+                surf_loop(session)
+                log("🔄 Surf loop terminato, provo altra chiave...")
+            else:
+                log("❌ sesids non trovato, riprovo con altra chiave")
+                continue
         else:
             log(f"   ❌ Login fallito")
 
