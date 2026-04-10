@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# app.py - Login con Selenium + Browserless, poi autosurf con requests
+# app.py - Versione senza Supabase, con lista hardcodata di chiavi Browserless
 
 import os
 import time
@@ -12,7 +12,6 @@ import cv2
 import faiss
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from supabase import create_client
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -29,8 +28,40 @@ EASYHITS_EMAIL = "sandrominori50+uiszuzoqatr@gmail.com"
 EASYHITS_PASSWORD = "DDnmVV45!!"
 REFERER_URL = "https://www.easyhits4u.com/?ref=nicolacaporale"
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+# Lista hardcodata di chiavi Browserless (quelle che hai fornito)
+BROWSERLESS_KEYS = [
+    "2UJK3J6z8WVUZCnebd8f5f45581cb8e33d54c5f102ff1ca1a",
+    "2UJK4Jun2RJGbpmb4744ac717d57e27d86a6f8cdea79ecb29",
+    "2UJK6yKb6025jjV0ec93e78221afdd7422cba5e9c2cf215b2",
+    "2UJK7NrAnPQHmLj5f59ebaeb40664e36acb5e9edb16258649",
+    "2UJK9tJF6fSUI1yee47518cbceb44b754091f65ffb37385e9",
+    "2UJKBhoRgHclEJteebf8c7771d9b2ac024e173d5e8c668e63",
+    "2UJKIOxgYKTLcPm78093f2ec30b29d3ed2796fd80812e30e4",
+    "2UJKKhepmZphDJ5934eae8e34c8cc2166d53c97e18d88842f",
+    "2UJKQznXMrCRsDe7e27bb3392684dc84617e99bfebb86c6f3",
+    "2UJKSaJ8LbR6yPMa1de82874dc44ebb02c6538905563345db",
+    "2UJKT2s7366Q95C9f93fe45d1e69c35b063479f681746371d",
+    "2UJKVmGU7EHnhBa7888f73274495565fd975f87911d955624",
+    "2UJKWATu0ywwDLj6745bd019eb949bc89ee0bde7b8aefcceb",
+    "2UJKYEO1MHAoKLP13c6d573801f1194a2db77382e1c9ca279",
+    "2UJKZKYxDW04Fvycd08e1f4373d86ac84939fd2da94b7bb6b",
+    "2UJKbrJ8mu81DDId0b0a6d5d6f09d4232e86c95d0508d2286",
+    "2UJKctR3YKrr0jNb8125ac5a469ffc015154b0ef2ebdfbd64",
+    "2UJKgrHd3wpB8ER8967264f75287a7a37b6c07cd1aa385e8a",
+    "2UJKhZ4nnu4dmrJdf0abe5a76fdcaccca3d4bde1c8e756207",
+    "2UJKj90nSPoPzbGb83f67c8d51804f74d9c294296731f16d2",
+    "2UJKkfMpBrzmSiT79baea21763312b842e8d76f0294e4922b",
+    "2UJKmcIjXmvO8XRd305c7cbfdc378b8c2b51b9a01431bdb05",
+    "2UJKneJJJ1geO9fc62ab067a9bba69951fc680ac31f68b318",
+    "2UJKpDVy5uUTm5ke53ea97a630f3e9d40890cda9536bef640",
+    "2UJKqHrcH8eFPru090c449d6f3349f227d34e0b64e05d9515",
+    "2UJKstbtf4Yhhihbee152f1524f4b30b4169646dacc6f57b9",
+    "2UJKu8uOav7pPEid44f93cbe5506e74a6aabdb11f8c3c51bb",
+    "2UJKwZYaR9WoIdNdef8ca3188b79f0f1642cf040f908a6f0d",
+    "2UJL4KwP022lo430841ccf7077da9eddca8f0e600bbb78ed0",
+    "2UJL5zV86C4xbIwe2fa97d07bb917acf5c449b96ab73c9241",
+    "2UJLTjMfcMlNuaw76c40208b2a61ce7f8fffa3fd8b570f8be",
+]
 
 dataset = None
 classes_fast = None
@@ -73,47 +104,6 @@ while not server_ready and timeout > 0:
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ================ SUPABASE =====================
-def get_working_key():
-    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        log("❌ Supabase not configured")
-        return None
-    try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-        resp = supabase.table('browserless_keys')\
-            .select('id', 'api_key')\
-            .in_('status', ['working', 'available'])\
-            .limit(1)\
-            .execute()
-        if resp.data:
-            key_id = resp.data[0]['id']
-            api_key = resp.data[0]['api_key']
-            supabase.table('browserless_keys')\
-                .update({'status': 'in_use'})\
-                .eq('id', key_id)\
-                .execute()
-            log(f"📦 Chiave: {api_key[:10]}... (status: in_use)")
-            return api_key
-        else:
-            log("❌ Nessuna chiave working/available")
-            return None
-    except Exception as e:
-        log(f"❌ Supabase error: {e}")
-        return None
-
-def release_key(api_key, new_status='used'):
-    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        return
-    try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-        supabase.table('browserless_keys')\
-            .update({'status': new_status})\
-            .eq('api_key', api_key)\
-            .execute()
-        log(f"   📝 Chiave {api_key[:10]}... → '{new_status}'")
-    except Exception as e:
-        log(f"   ⚠️ Errore rilascio: {e}")
-
 # ================ LOGIN CON SELENIUM (Browserless) =====================
 def do_login_selenium(api_key):
     browserless_url = f"wss://chrome.browserless.io?token={api_key}"
@@ -134,15 +124,14 @@ def do_login_selenium(api_key):
         password_field.send_keys(EASYHITS_PASSWORD)
         submit_btn = driver.find_element(By.XPATH, "//input[@type='submit']")
         submit_btn.click()
-        # Attendi che il login sia completato (presenza di user_id nel cookie)
+        # Attendi che il login sia completato
         time.sleep(5)
         cookies = driver.get_cookies()
         session = requests.Session()
         for cookie in cookies:
             session.cookies.set(cookie['name'], cookie['value'])
-        # Verifica sesids
         if 'sesids' in session.cookies.get_dict():
-            log(f"   ✅ Login Selenium OK! sesids: {session.cookies['sesids']}")
+            log(f"   ✅ Login OK! sesids: {session.cookies['sesids']}")
             session.headers.update({
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 'Referer': 'https://www.easyhits4u.com/surf/',
@@ -150,10 +139,10 @@ def do_login_selenium(api_key):
             })
             return session
         else:
-            log("   ❌ Selenium: sesids non trovato nei cookie")
+            log("   ❌ sesids non trovato")
             return None
     except Exception as e:
-        log(f"   ❌ Errore Selenium: {e}")
+        log(f"   ❌ Errore: {e}")
         return None
     finally:
         if driver:
@@ -178,7 +167,9 @@ def load_dataset_hf():
             batch = dataset[i:i+batch_size]
             X_batch = np.array(batch['X'], dtype=np.float32)
             index.add(X_batch)
-            log(f"   Aggiunti {len(X_batch)} vettori, totale {index.ntotal}/{total}")
+            # Riduci log per non riempire
+            if i % 50000 == 0:
+                log(f"   Aggiunti {index.ntotal}/{total} vettori")
         log(f"✅ Indice FAISS creato con {index.ntotal} vettori")
         faiss_index = index
         gc.collect()
@@ -187,7 +178,7 @@ def load_dataset_hf():
         log(f"❌ Errore dataset: {e}")
         return False
 
-# ================ FEATURE EXTRACTION (invariata) =====================
+# ================ FUNZIONI DI FEATURE EXTRACTION (invariate) =====================
 def centra_figura(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
@@ -313,7 +304,8 @@ def surf_loop(session):
                 continue
 
             data = r.json()
-            log(f"DEBUG risposta: {json.dumps(data, indent=2)[:500]}")
+            # Log ridotto per non riempire
+            log(f"DEBUG: surfses={data.get('surfses', {})} picmap_len={len(data.get('picmap', []))}")
 
             if data.get("redirect"):
                 log(f"⚠️ Redirect a {data['redirect']}")
@@ -398,33 +390,24 @@ def surf_loop(session):
 # ================ MAIN =====================
 def main():
     log("="*50)
-    log("🚀 EasyHits4U Bot - Login con Selenium + Autosurf")
+    log("🚀 EasyHits4U Bot - Login con Selenium + Autosurf (NO Supabase)")
     log("="*50)
 
-    max_keys_to_try = 5
-    for attempt in range(max_keys_to_try):
-        api_key = get_working_key()
-        if not api_key:
-            log("❌ Nessuna chiave disponibile")
-            return
-
-        log(f"🔑 Tentativo {attempt+1}/{max_keys_to_try} con chiave {api_key[:10]}...")
+    for api_key in BROWSERLESS_KEYS:
+        log(f"🔑 Tentativo con chiave {api_key[:10]}...")
         session = do_login_selenium(api_key)
         if session:
             log("✅ Login riuscito con sesids")
             if not load_dataset_hf():
-                log("❌ Dataset non caricato")
-                release_key(api_key, 'broken')
-                continue
+                log("❌ Dataset non caricato, abort")
+                return
             log("🚀 Avvio surf loop")
             surf_loop(session)
-            release_key(api_key, 'used')
             return
         else:
-            log("❌ Login fallito (cookie sesids mancante)")
-            release_key(api_key, 'broken')
+            log("❌ Login fallito, passo alla prossima chiave")
 
-    log("❌ Nessuna chiave funzionante")
+    log("❌ Nessuna chiave funzionante tra quelle disponibili")
 
 if __name__ == "__main__":
     main()
