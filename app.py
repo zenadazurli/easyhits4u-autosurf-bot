@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# app.py - Login BQL + Autosurf con estrazione CSRF token
+# app.py - Login BQL + Autosurf usando header Cookie manuale (come script locale)
 
 import requests
 import json
 import time
 import os
-import re
 import cv2
 import numpy as np
 import faiss
@@ -129,7 +128,10 @@ def get_cf_token(api_key):
         log(f"   ❌ Errore: {e}")
         return None
 
-def login_with_token(token):
+def login_and_get_cookie_string(api_key):
+    token = get_cf_token(api_key)
+    if not token:
+        return None
     session = requests.Session()
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/148.0',
@@ -147,33 +149,13 @@ def login_with_token(token):
     }
     session.get(REFERER_URL)
     response = session.post("https://www.easyhits4u.com/logon/", data=data, headers=headers, allow_redirects=True, timeout=30)
-    final_cookies = session.cookies.get_dict()
-    
-    if 'user_id' in final_cookies and 'sesids' in final_cookies:
-        log(f"   ✅ Login OK! user_id: {final_cookies['user_id']}, sesids: {final_cookies['sesids']}")
-        return session
+    cookies = session.cookies.get_dict()
+    if 'user_id' in cookies and 'sesids' in cookies:
+        cookie_str = f"sesids={cookies['sesids']}; user_id={cookies['user_id']}"
+        log(f"   ✅ Login OK! Cookie string: {cookie_str}")
+        return cookie_str
     else:
-        log(f"   ❌ Cookie mancanti: {final_cookies.get('user_id')} / {final_cookies.get('sesids')}")
-        return None
-
-# ==================== OTTIENI CSRF TOKEN ====================
-def get_csrf_token(session):
-    try:
-        r = session.get("https://www.easyhits4u.com/surf/", verify=False, timeout=15)
-        if r.status_code != 200:
-            log(f"   ⚠️ GET /surf/ status {r.status_code}")
-            return None
-        # Cerca token CSRF nel form (es. name="csrf_token")
-        match = re.search(r'name="csrf_token"\s+value="([^"]+)"', r.text)
-        if match:
-            csrf = match.group(1)
-            log(f"   ✅ CSRF token trovato: {csrf[:10]}...")
-            return csrf
-        else:
-            log("   ℹ️ Nessun CSRF token trovato")
-            return None
-    except Exception as e:
-        log(f"   ❌ Errore GET /surf/: {e}")
+        log(f"   ❌ Cookie mancanti: {cookies}")
         return None
 
 # ==================== DATASET ====================
@@ -202,61 +184,81 @@ def load_dataset_hf():
         log(f"❌ Errore dataset: {e}")
         return False
 
-# ==================== FUNZIONI DI RICONOSCIMENTO ====================
-def centra_figura(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+# ==================== FUNZIONI DI RICONOSCIMENTO (adattate dallo script locale) ====================
+def centra_figura(img):
+    if img is None or img.size == 0:
+        return cv2.resize(np.full((DIM, DIM, 3), 255, dtype=np.uint8), (DIM, DIM))
+    try:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    except:
+        return cv2.resize(img, (DIM, DIM))
     _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return cv2.resize(image, (DIM, DIM))
-    cnt = max(contours, key=cv2.contourArea)
-    x, y, w, h = cv2.boundingRect(cnt)
-    crop = image[y:y+h, x:x+w]
+    cnts, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return cv2.resize(img, (DIM, DIM))
+    c = max(cnts, key=cv2.contourArea)
+    x, y, w, h = cv2.boundingRect(c)
+    crop = img[y:y+h, x:x+w]
+    if crop is None or crop.size == 0:
+        return cv2.resize(img, (DIM, DIM))
     return cv2.resize(crop, (DIM, DIM))
 
 def estrai_descrittori(img):
+    img = centra_figura(img)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     circularity = 0.0
     aspect_ratio = 0.0
-    if contours:
-        cnt = max(contours, key=cv2.contourArea)
+    if cnts:
+        cnt = max(cnts, key=cv2.contourArea)
         peri = cv2.arcLength(cnt, True)
         area = cv2.contourArea(cnt)
-        if peri != 0:
+        if peri > 0:
             circularity = 4.0 * np.pi * area / (peri * peri)
         x, y, w, h = cv2.boundingRect(cnt)
-        aspect_ratio = float(w)/h if h != 0 else 0.0
+        if h != 0:
+            aspect_ratio = float(w) / float(h)
     moments = cv2.moments(thresh)
     hu = cv2.HuMoments(moments).flatten().tolist()
     h, w = img.shape[:2]
-    cx, cy = w//2, h//2
-    raggi = [int(min(h,w)*r) for r in (0.2, 0.4, 0.6, 0.8)]
+    cx, cy = w // 2, h // 2
     radiale = []
-    for r in raggi:
-        mask = np.zeros((h,w), np.uint8)
-        cv2.circle(mask, (cx,cy), r, 255, -1)
+    for r in [int(min(h, w) * v) for v in (0.2, 0.4, 0.6, 0.8)]:
+        mask = np.zeros((h, w), np.uint8)
+        cv2.circle(mask, (cx, cy), r, 255, -1)
         mean = cv2.mean(img, mask=mask)[:3]
-        radiale.extend([m/255.0 for m in mean])
+        radiale.extend([m / 255.0 for m in mean])
     spaziale = []
-    quadranti = [(0,0,cx,cy), (cx,0,w,cy), (0,cy,cx,h), (cx,cy,w,h)]
+    quadranti = [(0,0,cx,cy),(cx,0,w,cy),(0,cy,cx,h),(cx,cy,w,h)]
     for (x1,y1,x2,y2) in quadranti:
         roi = img[y1:y2, x1:x2]
-        if roi.size > 0:
+        if roi is None or roi.size == 0:
+            spaziale.extend([0.0, 0.0, 0.0])
+        else:
             mean = cv2.mean(roi)[:3]
-            spaziale.extend([m/255.0 for m in mean])
-    vettore = radiale + spaziale + [circularity, aspect_ratio] + hu
-    return np.array(vettore, dtype=float)
+            spaziale.extend([m / 255.0 for m in mean])
+    vec = np.array(radiale + spaziale + [circularity, aspect_ratio] + hu, dtype=float)
+    return vec
 
-def predict(img_crop):
+def predici_label_by_vector(v):
+    global X_fast, y_fast, classes_fast
+    if X_fast is None:
+        return None
+    try:
+        dif = X_fast - v
+        dists = np.einsum('ij,ij->i', dif, dif)
+        idx = int(np.argmin(dists))
+        lab_idx = int(y_fast[idx])
+        return classes_fast.get(lab_idx, str(lab_idx))
+    except:
+        return None
+
+def predici(img_crop):
     if img_crop is None or img_crop.size == 0:
         return None
-    features = estrai_descrittori(img_crop).astype(np.float32).reshape(1, -1)
-    distances, indices = faiss_index.search(features, 1)
-    best_idx = indices[0][0]
-    true_label_idx = dataset['y'][best_idx]
-    return classes_fast.get(int(true_label_idx), "errore")
+    v = estrai_descrittori(img_crop)
+    return predici_label_by_vector(v)
 
 def crop_safe(img, coords):
     try:
@@ -295,28 +297,25 @@ def salva_errore(qpic, img, picmap, labels, chosen_idx, motivo, urlid=None):
         json.dump(metadata, f, indent=2)
     log(f"📁 Errore salvato in {folder}")
 
-# ==================== SURF LOOP CON CSRF TOKEN ====================
-def surf_loop(session):
+# ==================== SURF LOOP (usando header Cookie manuale) ====================
+def surf_loop(cookie_str):
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/148.0',
+        'Cookie': cookie_str,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Referer': 'https://www.easyhits4u.com/surf/',
+        'X-Requested-With': 'XMLHttpRequest'
+    }
+    session = requests.Session()
     consecutive_failures = 0
     captcha_counter = 0
-
-    # Ottieni CSRF token prima del loop
-    csrf_token = get_csrf_token(session)
-    if csrf_token:
-        # Aggiungi il token agli header o ai dati della POST
-        session.headers.update({'X-CSRF-Token': csrf_token})
 
     while True:
         try:
             timestamp = int(time.time() * 1000)
-            # Aggiungi il token anche come parametro POST se necessario
-            post_data = {}
-            if csrf_token:
-                post_data['csrf_token'] = csrf_token
             r = session.post(
                 f"https://www.easyhits4u.com/surf/?ajax=1&try=1&_={timestamp}",
-                data=post_data,
-                verify=False, timeout=REQUEST_TIMEOUT
+                headers=headers, verify=False, timeout=REQUEST_TIMEOUT
             )
             if r.status_code != 200:
                 log(f"⚠️ Status {r.status_code}")
@@ -327,7 +326,6 @@ def surf_loop(session):
                 continue
 
             data = r.json()
-            
             if data.get("redirect"):
                 log(f"⚠️ Sessione scaduta (redirect a {data['redirect']})")
                 break
@@ -347,12 +345,14 @@ def surf_loop(session):
 
             consecutive_failures = 0
 
-            img_data = session.get(f"https://www.easyhits4u.com/simg/{qpic}.jpg", verify=False).content
-            img = cv2.imdecode(np.frombuffer(img_data, np.uint8), cv2.IMREAD_COLOR)
+            # Scarica immagine del captcha
+            rimg = session.get(f"https://www.easyhits4u.com/simg/{qpic}.jpg", headers=headers, verify=False)
+            img = cv2.imdecode(np.frombuffer(rimg.content, np.uint8), cv2.IMREAD_COLOR)
             crops = [crop_safe(img, p.get("coords", "")) for p in picmap]
-            labels = [predict(c) for c in crops]
+            labels = [predici(c) for c in crops]
             log(f"Labels: {labels}")
 
+            # Trova duplicato
             seen = {}
             chosen_idx = None
             for i, label in enumerate(labels):
@@ -376,7 +376,7 @@ def surf_loop(session):
             resp = session.get(
                 f"https://www.easyhits4u.com/surf/?f=surf&urlid={urlid}&surftype=2"
                 f"&ajax=1&word={word}&screen_width=1024&screen_height=768",
-                verify=False
+                headers=headers, verify=False
             )
             resp_json = resp.json()
             if resp_json.get("warning") == "wrong_choice":
@@ -407,7 +407,7 @@ def surf_loop(session):
 # ==================== MAIN ====================
 def main():
     log("=" * 50)
-    log("🚀 LOGIN + AUTOSURF (BQL con CSRF token)")
+    log("🚀 LOGIN + AUTOSURF (con header Cookie manuale)")
     log("=" * 50)
     
     if not load_dataset_hf():
@@ -417,15 +417,10 @@ def main():
     for api_key in VALID_KEYS:
         log(f"🔑 Tentativo con chiave: {api_key[:10]}...")
         
-        token = get_cf_token(api_key)
-        if not token:
-            log(f"   ❌ Token non ottenuto")
-            continue
-        
-        session = login_with_token(token)
-        if session:
+        cookie_str = login_and_get_cookie_string(api_key)
+        if cookie_str:
             log("✅ Login riuscito! Avvio surf loop...")
-            surf_loop(session)
+            surf_loop(cookie_str)
             log("🔄 Surf loop terminato, provo altra chiave...")
         else:
             log(f"   ❌ Login fallito")
