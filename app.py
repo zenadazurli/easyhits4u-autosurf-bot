@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# app.py - Login (con BQL) + Autosurf (solo requests)
+# app.py - Login BQL + Autosurf con estrazione CSRF token
 
 import requests
 import json
 import time
 import os
+import re
 import cv2
 import numpy as np
 import faiss
@@ -23,7 +24,7 @@ EASYHITS_PASSWORD = "DDnmVV45!!"
 REFERER_URL = "https://www.easyhits4u.com/?ref=nicolacaporale"
 BROWSERLESS_URL = "https://production-sfo.browserless.io/chrome/bql"
 
-# ==================== CHIAVI VALIDE (QUELLE CHE FUNZIONANO) ====================
+# ==================== CHIAVI VALIDE (quelle che funzionano) ====================
 VALID_KEYS = [
     "2UFyHOdxsID23VMa0518a22c6b683ea3c11c1bdca148d5381",
     "2UIAf0U41Twctlr77ecbfa2545692634758496b2eb88a170c",
@@ -95,7 +96,7 @@ vector_dim = 33
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ==================== LOGIN (BQL) ====================
+# ==================== LOGIN BQL ====================
 def get_cf_token(api_key):
     query = """
     mutation {
@@ -148,10 +149,32 @@ def login_with_token(token):
     response = session.post("https://www.easyhits4u.com/logon/", data=data, headers=headers, allow_redirects=True, timeout=30)
     final_cookies = session.cookies.get_dict()
     
-    if 'user_id' in final_cookies:
-        log(f"   ✅ Login OK! user_id: {final_cookies['user_id']}, sesids: {final_cookies.get('sesids', 'NON TROVATO')}")
+    if 'user_id' in final_cookies and 'sesids' in final_cookies:
+        log(f"   ✅ Login OK! user_id: {final_cookies['user_id']}, sesids: {final_cookies['sesids']}")
         return session
-    return None
+    else:
+        log(f"   ❌ Cookie mancanti: {final_cookies.get('user_id')} / {final_cookies.get('sesids')}")
+        return None
+
+# ==================== OTTIENI CSRF TOKEN ====================
+def get_csrf_token(session):
+    try:
+        r = session.get("https://www.easyhits4u.com/surf/", verify=False, timeout=15)
+        if r.status_code != 200:
+            log(f"   ⚠️ GET /surf/ status {r.status_code}")
+            return None
+        # Cerca token CSRF nel form (es. name="csrf_token")
+        match = re.search(r'name="csrf_token"\s+value="([^"]+)"', r.text)
+        if match:
+            csrf = match.group(1)
+            log(f"   ✅ CSRF token trovato: {csrf[:10]}...")
+            return csrf
+        else:
+            log("   ℹ️ Nessun CSRF token trovato")
+            return None
+    except Exception as e:
+        log(f"   ❌ Errore GET /surf/: {e}")
+        return None
 
 # ==================== DATASET ====================
 def load_dataset_hf():
@@ -188,7 +211,7 @@ def centra_figura(image):
         return cv2.resize(image, (DIM, DIM))
     cnt = max(contours, key=cv2.contourArea)
     x, y, w, h = cv2.boundingRect(cnt)
-    crop = image[y:y+h, x:x+w)
+    crop = image[y:y+h, x:x+w]
     return cv2.resize(crop, (DIM, DIM))
 
 def estrai_descrittori(img):
@@ -272,16 +295,27 @@ def salva_errore(qpic, img, picmap, labels, chosen_idx, motivo, urlid=None):
         json.dump(metadata, f, indent=2)
     log(f"📁 Errore salvato in {folder}")
 
-# ==================== SURF LOOP (senza GET iniziale) ====================
+# ==================== SURF LOOP CON CSRF TOKEN ====================
 def surf_loop(session):
     consecutive_failures = 0
     captcha_counter = 0
 
+    # Ottieni CSRF token prima del loop
+    csrf_token = get_csrf_token(session)
+    if csrf_token:
+        # Aggiungi il token agli header o ai dati della POST
+        session.headers.update({'X-CSRF-Token': csrf_token})
+
     while True:
         try:
             timestamp = int(time.time() * 1000)
+            # Aggiungi il token anche come parametro POST se necessario
+            post_data = {}
+            if csrf_token:
+                post_data['csrf_token'] = csrf_token
             r = session.post(
                 f"https://www.easyhits4u.com/surf/?ajax=1&try=1&_={timestamp}",
+                data=post_data,
                 verify=False, timeout=REQUEST_TIMEOUT
             )
             if r.status_code != 200:
@@ -373,7 +407,7 @@ def surf_loop(session):
 # ==================== MAIN ====================
 def main():
     log("=" * 50)
-    log("🚀 LOGIN + AUTOSURF (BQL, solo chiavi funzionanti)")
+    log("🚀 LOGIN + AUTOSURF (BQL con CSRF token)")
     log("=" * 50)
     
     if not load_dataset_hf():
@@ -390,14 +424,9 @@ def main():
         
         session = login_with_token(token)
         if session:
-            # Verifica se sesids è presente
-            if 'sesids' in session.cookies.get_dict():
-                log("✅ Login riuscito con sesids! Avvio surf loop...")
-                surf_loop(session)
-                log("🔄 Surf loop terminato, provo altra chiave...")
-            else:
-                log("❌ sesids non trovato, riprovo con altra chiave")
-                continue
+            log("✅ Login riuscito! Avvio surf loop...")
+            surf_loop(session)
+            log("🔄 Surf loop terminato, provo altra chiave...")
         else:
             log(f"   ❌ Login fallito")
 
