@@ -1,3 +1,4 @@
+selenium
 requests
 supabase
 opencv-python-headless
