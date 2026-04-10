@@ -75,7 +75,6 @@ def log(msg):
 
 # ================ SUPABASE FUNCTIONS =====================
 def get_working_key():
-    """Recupera una chiave con status 'working' o 'available' e la marca come 'in_use'"""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         log("❌ Supabase non configurato")
         return None
@@ -175,7 +174,7 @@ def do_login(api_key):
         return session
     return None
 
-# ================ DATASET HUGGING FACE (FAISS) =====================
+# ================ DATASET HUGGING FACE (FAISS) - VERSIONE LIGHT =====================
 def load_dataset_hf():
     global dataset, classes_fast, faiss_index
     log("📥 Caricamento dataset da Hugging Face Hub...")
@@ -186,7 +185,7 @@ def load_dataset_hf():
         class_names = dataset.features['y'].names
         classes_fast = {i: name for i, name in enumerate(class_names)}
         
-        log("🔧 Costruzione indice FAISS...")
+        log("🔧 Costruzione indice FAISS (FlatL2, senza addestramento)...")
         X_list = []
         batch_size = 500
         for i in range(0, len(dataset), batch_size):
@@ -195,13 +194,8 @@ def load_dataset_hf():
         X_all = np.vstack(X_list)
         log(f"📊 Vettori caricati: {X_all.shape}")
         
-        nlist = 100
-        m = 3
-        d = vector_dim
-        quantizer = faiss.IndexFlatL2(d)
-        index = faiss.IndexIVFPQ(quantizer, d, nlist, m, 8)
-        log("🏋️ Addestramento indice FAISS...")
-        index.train(X_all)
+        # Usa IndexFlatL2 (ricerca brute-force, più stabile)
+        index = faiss.IndexFlatL2(vector_dim)
         index.add(X_all)
         log(f"✅ Indice FAISS creato con {index.ntotal} vettori")
         faiss_index = index
