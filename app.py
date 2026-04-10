@@ -1,35 +1,33 @@
 #!/usr/bin/env python3
-# app.py - Login + Autosurf con Selenium + Browserless (endpoint corretto)
+# app.py - Login + Autosurf con Browserless BQL (stessa sessione)
 
-import os
-import time
-import json
-import threading
-import gc
 import requests
-import numpy as np
+import json
+import time
+import os
 import cv2
+import numpy as np
 import faiss
+import gc
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+from datasets import load_dataset
 
-# ================ CONFIG =====================
+# ==================== CONFIGURAZIONE ====================
 DIM = 64
 REQUEST_TIMEOUT = 15
 ERRORI_DIR = "/tmp/errori"
-HEALTH_CHECK_PORT = int(os.environ.get('PORT', 10000))
 MAX_CONSECUTIVE_FAILURES = 5
 
 # Credenziali EasyHits4U
 EASYHITS_EMAIL = "sandrominori50+uiszuzoqatr@gmail.com"
 EASYHITS_PASSWORD = "DDnmVV45!!"
+REFERER_URL = "https://www.easyhits4u.com/?ref=nicolacaporale"
 
-# Lista di chiavi Browserless (usa quelle che hai generato)
-BROWSERLESS_KEYS = [
+# Browserless endpoint
+BROWSERLESS_URL = "https://production-sfo.browserless.io/chrome/bql"
+
+# Chiavi Browserless (usa quelle che hai)
+VALID_KEYS = [
     "2UJK3J6z8WVUZCnebd8f5f45581cb8e33d54c5f102ff1ca1a",
     "2UJK4Jun2RJGbpmb4744ac717d57e27d86a6f8cdea79ecb29",
     "2UJK6yKb6025jjV0ec93e78221afdd7422cba5e9c2cf215b2",
@@ -57,109 +55,27 @@ BROWSERLESS_KEYS = [
     "2UJLTjMfcMlNuaw76c40208b2a61ce7f8fffa3fd8b570f8be"
 ]
 
+# ==================== GLOBALS DATASET ====================
 dataset = None
 classes_fast = None
 faiss_index = None
 vector_dim = 33
-server_ready = False
 
-# ================ HEALTH CHECK =====================
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/health':
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
-            self.end_headers()
-            self.wfile.write(b'OK')
-        else:
-            self.send_response(404)
-            self.end_headers()
-    def log_message(self, format, *args):
-        pass
-
-def run_health_server():
-    global server_ready
-    try:
-        server = HTTPServer(('0.0.0.0', HEALTH_CHECK_PORT), HealthHandler)
-        server_ready = True
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🏥 Health check avviato su porta {HEALTH_CHECK_PORT}")
-        server.serve_forever()
-    except Exception as e:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Health check error: {e}")
-        server_ready = False
-
-health_thread = threading.Thread(target=run_health_server, daemon=True)
-health_thread.start()
-timeout = 10
-while not server_ready and timeout > 0:
-    time.sleep(0.5)
-    timeout -= 0.5
-
+# ==================== LOG ====================
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ================ LOGIN CON SELENIUM (Browserless) =====================
-def do_login_selenium(api_key):
-    # ENDPOINT CORRETTO: https, non wss, con /webdriver
-    browserless_url = f"https://chrome.browserless.io/webdriver?token={api_key}"
-    log(f"   🌐 Connessione a {browserless_url[:50]}...")
-    options = webdriver.ChromeOptions()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    driver = None
-    try:
-        driver = webdriver.Remote(command_executor=browserless_url, options=options)
-        driver.get("https://www.easyhits4u.com")
-        wait = WebDriverWait(driver, 30)
-        login_btn = wait.until(EC.element_to_be_clickable((By.LINK_TEXT, "Login")))
-        login_btn.click()
-        username_field = wait.until(EC.presence_of_element_located((By.NAME, "username")))
-        password_field = driver.find_element(By.NAME, "password")
-        username_field.send_keys(EASYHITS_EMAIL)
-        password_field.send_keys(EASYHITS_PASSWORD)
-        submit_btn = driver.find_element(By.XPATH, "//input[@type='submit']")
-        submit_btn.click()
-        # Attendi il completamento del login (presenza di cookie o reindirizzamento)
-        time.sleep(8)
-        # Estrai cookie
-        cookies = driver.get_cookies()
-        session = requests.Session()
-        for cookie in cookies:
-            session.cookies.set(cookie['name'], cookie['value'])
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': 'https://www.easyhits4u.com/surf/',
-            'X-Requested-With': 'XMLHttpRequest'
-        })
-        # Verifica presenza sesids
-        cookie_dict = session.cookies.get_dict()
-        if 'sesids' in cookie_dict:
-            log(f"   ✅ Login OK! user_id={cookie_dict.get('user_id')}, sesids={cookie_dict['sesids']}")
-            return session
-        else:
-            log(f"   ❌ Cookie sesids non trovato. Cookie ricevuti: {list(cookie_dict.keys())}")
-            return None
-    except Exception as e:
-        log(f"   ❌ Errore Selenium: {e}")
-        return None
-    finally:
-        if driver:
-            driver.quit()
-
-# ================ DATASET HUGGING FACE =====================
+# ==================== DATASET HUGGING FACE ====================
 def load_dataset_hf():
     global dataset, classes_fast, faiss_index
     log("📥 Caricamento dataset da Hugging Face Hub...")
     try:
-        from datasets import load_dataset
         dataset = load_dataset("zenadazurli/easyhits4u-dataset", split="train", token=None)
         log(f"✅ Dataset caricato: {len(dataset)} vettori")
         class_names = dataset.features['y'].names
         classes_fast = {i: name for i, name in enumerate(class_names)}
         
-        log("🔧 Costruzione indice FAISS (FlatL2) incrementale...")
+        log("🔧 Costruzione indice FAISS...")
         index = faiss.IndexFlatL2(vector_dim)
         batch_size = 5000
         total = len(dataset)
@@ -177,7 +93,7 @@ def load_dataset_hf():
         log(f"❌ Errore dataset: {e}")
         return False
 
-# ================ FUNZIONI DI FEATURE EXTRACTION =====================
+# ==================== FUNZIONI DI RICONOSCIMENTO ====================
 def centra_figura(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
@@ -224,14 +140,10 @@ def estrai_descrittori(img):
     vettore = radiale + spaziale + [circularity, aspect_ratio] + hu
     return np.array(vettore, dtype=float)
 
-def get_features(img):
-    img_centrata = centra_figura(img)
-    return estrai_descrittori(img_centrata)
-
 def predict(img_crop):
     if img_crop is None or img_crop.size == 0:
         return None
-    features = get_features(img_crop).astype(np.float32).reshape(1, -1)
+    features = estrai_descrittori(img_crop).astype(np.float32).reshape(1, -1)
     distances, indices = faiss_index.search(features, 1)
     best_idx = indices[0][0]
     true_label_idx = dataset['y'][best_idx]
@@ -274,12 +186,82 @@ def salva_errore(qpic, img, picmap, labels, chosen_idx, motivo, urlid=None):
         json.dump(metadata, f, indent=2)
     log(f"📁 Errore salvato in {folder}")
 
-# ================ SURF LOOP =====================
+# ==================== LOGIN (Browserless BQL) ====================
+def get_cf_token(api_key):
+    query = """
+    mutation {
+      goto(url: "https://www.easyhits4u.com/logon/", waitUntil: networkIdle, timeout: 60000) {
+        status
+      }
+      solve(type: cloudflare, timeout: 60000) {
+        solved
+        token
+        time
+      }
+    }
+    """
+    url = f"{BROWSERLESS_URL}?token={api_key}"
+    try:
+        start = time.time()
+        response = requests.post(url, json={"query": query}, headers={"Content-Type": "application/json"}, timeout=120)
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        if "errors" in data:
+            return None
+        solve_info = data.get("data", {}).get("solve", {})
+        if solve_info.get("solved"):
+            token = solve_info.get("token")
+            log(f"   ✅ Token ({time.time()-start:.1f}s)")
+            return token
+        return None
+    except Exception as e:
+        log(f"   ❌ Errore token: {e}")
+        return None
+
+def do_login(api_key):
+    """Esegue login e restituisce la sessione requests con i cookie"""
+    token = get_cf_token(api_key)
+    if not token:
+        return None
+    
+    session = requests.Session()
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/148.0',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Referer': REFERER_URL,
+    }
+    data = {
+        'manual': '1',
+        'fb_id': '',
+        'fb_token': '',
+        'google_code': '',
+        'username': EASYHITS_EMAIL,
+        'password': EASYHITS_PASSWORD,
+        'cf-turnstile-response': token,
+    }
+    session.get(REFERER_URL)
+    resp = session.post("https://www.easyhits4u.com/logon/", data=data, headers=headers, allow_redirects=True, timeout=30)
+    final_cookies = session.cookies.get_dict()
+    
+    if 'user_id' in final_cookies and 'sesids' in final_cookies:
+        log(f"   ✅ Login OK! user_id={final_cookies['user_id']}, sesids={final_cookies['sesids']}")
+        # Aggiungi header per le richieste AJAX
+        session.headers.update({
+            'Referer': 'https://www.easyhits4u.com/surf/',
+            'X-Requested-With': 'XMLHttpRequest'
+        })
+        return session
+    else:
+        log(f"   ❌ Cookie mancanti: user_id={final_cookies.get('user_id')}, sesids={final_cookies.get('sesids')}")
+        return None
+
+# ==================== SURF LOOP ====================
 def surf_loop(session):
     consecutive_failures = 0
     captcha_counter = 0
 
-    # Inizializzazione surfing: visita /surf/
+    # Inizializzazione: visita /surf/
     try:
         log("🌐 Inizializzazione /surf/...")
         r = session.get("https://www.easyhits4u.com/surf/", verify=False, timeout=15)
@@ -304,13 +286,10 @@ def surf_loop(session):
                 continue
 
             data = r.json()
+            
             if data.get("redirect"):
-                log(f"⚠️ Redirect a {data['redirect']}")
-                consecutive_failures += 1
-                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    break
-                time.sleep(5)
-                continue
+                log(f"⚠️ Sessione scaduta (redirect a {data['redirect']})")
+                break
 
             urlid = data.get("surfses", {}).get("urlid")
             qpic = data.get("surfses", {}).get("qpic")
@@ -384,29 +363,32 @@ def surf_loop(session):
 
     log("🏁 Surf loop terminato")
 
-# ================ MAIN =====================
+# ==================== MAIN ====================
 def main():
-    log("="*50)
-    log("🚀 EasyHits4U Bot - Selenium + Browserless (endpoint corretto)")
-    log("="*50)
-
+    log("=" * 50)
+    log("🚀 LOGIN + AUTOSURF CON BROWSERLESS BQL")
+    log("=" * 50)
+    
     # Carica dataset
     if not load_dataset_hf():
         log("❌ Dataset non caricato, esco")
         return
-
-    # Prova ogni chiave finché non funziona
-    for api_key in BROWSERLESS_KEYS:
-        log(f"🔑 Tentativo con chiave {api_key[:10]}...")
-        session = do_login_selenium(api_key)
+    
+    # Prova ogni chiave
+    for api_key in VALID_KEYS:
+        log(f"🔑 Tentativo con chiave: {api_key[:10]}...")
+        
+        session = do_login(api_key)
         if session:
             log("✅ Login riuscito! Avvio surf loop...")
             surf_loop(session)
-            return
+            # Se arriviamo qui, il surf loop è terminato (sessione scaduta)
+            log("🔄 Sessione scaduta, provo altra chiave...")
+            continue
         else:
-            log("❌ Login fallito, passo alla prossima chiave")
-
-    log("❌ Nessuna chiave funzionante tra quelle disponibili")
+            log(f"❌ Login fallito, passo alla prossima chiave")
+    
+    log("❌ Login fallito con tutte le chiavi")
 
 if __name__ == "__main__":
     main()
