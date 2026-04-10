@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# app.py - Login + Autosurf per EasyHits4U con stabilizzazione sessione
+# app.py - Login + Autosurf con inizializzazione corretta della sessione di surfing
 
 import os
 import time
 import json
 import threading
 import gc
+import re
 import requests
 import numpy as np
 import cv2
@@ -21,23 +22,20 @@ ERRORI_DIR = "/tmp/errori"
 HEALTH_CHECK_PORT = int(os.environ.get('PORT', 10000))
 MAX_CONSECUTIVE_FAILURES = 5
 
-# Credenziali EasyHits4U
 EASYHITS_EMAIL = "sandrominori50+uiszuzoqatr@gmail.com"
 EASYHITS_PASSWORD = "DDnmVV45!!"
 REFERER_URL = "https://www.easyhits4u.com/?ref=nicolacaporale"
 
-# Supabase
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 
-# Globals per dataset
 dataset = None
 classes_fast = None
 faiss_index = None
 vector_dim = 33
 server_ready = False
 
-# ================ HEALTH CHECK SERVER =====================
+# ================ HEALTH CHECK =====================
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/health':
@@ -56,10 +54,10 @@ def run_health_server():
     try:
         server = HTTPServer(('0.0.0.0', HEALTH_CHECK_PORT), HealthHandler)
         server_ready = True
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🏥 Health check server avviato sulla porta {HEALTH_CHECK_PORT}")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🏥 Health check avviato su porta {HEALTH_CHECK_PORT}")
         server.serve_forever()
     except Exception as e:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ ERRORE health check: {e}")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Health check error: {e}")
         server_ready = False
 
 health_thread = threading.Thread(target=run_health_server, daemon=True)
@@ -69,14 +67,13 @@ while not server_ready and timeout > 0:
     time.sleep(0.5)
     timeout -= 0.5
 
-# ================ LOG =====================
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ================ SUPABASE FUNCTIONS =====================
+# ================ SUPABASE =====================
 def get_working_key():
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        log("❌ Supabase non configurato")
+        log("❌ Supabase not configured")
         return None
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -92,13 +89,13 @@ def get_working_key():
                 .update({'status': 'in_use'})\
                 .eq('id', key_id)\
                 .execute()
-            log(f"📦 Chiave ottenuta: {api_key[:10]}... (status: in_use)")
+            log(f"📦 Chiave: {api_key[:10]}... (status: in_use)")
             return api_key
         else:
-            log("❌ Nessuna chiave 'working' o 'available' disponibile")
+            log("❌ Nessuna chiave working/available")
             return None
     except Exception as e:
-        log(f"❌ Errore Supabase: {e}")
+        log(f"❌ Supabase error: {e}")
         return None
 
 def release_key(api_key, new_status='used'):
@@ -112,7 +109,7 @@ def release_key(api_key, new_status='used'):
             .execute()
         log(f"   📝 Chiave {api_key[:10]}... → '{new_status}'")
     except Exception as e:
-        log(f"   ⚠️ Errore rilascio chiave: {e}")
+        log(f"   ⚠️ Errore rilascio: {e}")
 
 # ================ LOGIN (Browserless BQL) =====================
 def get_cf_token(api_key):
@@ -144,7 +141,7 @@ def get_cf_token(api_key):
             return token
         return None
     except Exception as e:
-        log(f"   ❌ Errore token: {e}")
+        log(f"   ❌ Token error: {e}")
         return None
 
 def do_login(api_key):
@@ -171,15 +168,40 @@ def do_login(api_key):
     final_cookies = session.cookies.get_dict()
     if 'user_id' in final_cookies:
         log(f"   ✅ Login OK! user_id: {final_cookies['user_id']}")
-        # Aggiungi header standard per le richieste successive
+        # Header per le richieste AJAX
         session.headers.update({
-            'Referer': 'https://www.easyhits4u.com/member/',
+            'Referer': 'https://www.easyhits4u.com/surf/',
             'X-Requested-With': 'XMLHttpRequest'
         })
         return session
     return None
 
-# ================ DATASET HUGGING FACE (FAISS) - VERSIONE LIGHT =====================
+# ================ INIZIALIZZAZIONE SESSIONE SURF =====================
+def init_surf_session(session):
+    """Visita la pagina /surf/ per inizializzare la sessione e ottenere eventuali token"""
+    log("🌐 Inizializzazione sessione surfing...")
+    try:
+        r = session.get("https://www.easyhits4u.com/surf/", verify=False, timeout=15)
+        if r.status_code == 200:
+            # Cerca eventuale token CSRF (es. name="csrf_token")
+            match = re.search(r'name="csrf_token"\s+value="([^"]+)"', r.text)
+            if match:
+                csrf = match.group(1)
+                session.headers.update({'X-CSRF-Token': csrf})
+                log(f"   ✅ CSRF token trovato: {csrf[:10]}...")
+            else:
+                log("   ℹ️ Nessun CSRF token trovato (forse non serve)")
+            # Aggiungi altri cookie che potrebbero essere settati
+            time.sleep(2)
+            return True
+        else:
+            log(f"   ⚠️ GET /surf/ risponde con {r.status_code}")
+            return False
+    except Exception as e:
+        log(f"   ❌ Errore init: {e}")
+        return False
+
+# ================ DATASET HUGGING FACE (FAISS) =====================
 def load_dataset_hf():
     global dataset, classes_fast, faiss_index
     log("📥 Caricamento dataset da Hugging Face Hub...")
@@ -198,7 +220,6 @@ def load_dataset_hf():
             X_list.append(np.array(batch['X'], dtype=np.float32))
         X_all = np.vstack(X_list)
         log(f"📊 Vettori caricati: {X_all.shape}")
-        
         index = faiss.IndexFlatL2(vector_dim)
         index.add(X_all)
         log(f"✅ Indice FAISS creato con {index.ntotal} vettori")
@@ -207,10 +228,10 @@ def load_dataset_hf():
         gc.collect()
         return True
     except Exception as e:
-        log(f"❌ Errore caricamento dataset: {e}")
+        log(f"❌ Errore dataset: {e}")
         return False
 
-# ================ FUNZIONI DI FEATURE EXTRACTION =====================
+# ================ FEATURE EXTRACTION (identica) =====================
 def centra_figura(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
@@ -307,21 +328,16 @@ def salva_errore(qpic, img, picmap, labels, chosen_idx, motivo, urlid=None):
         json.dump(metadata, f, indent=2)
     log(f"📁 Errore salvato in {folder}")
 
-# ================ SURF LOOP CON STABILIZZAZIONE =====================
+# ================ SURF LOOP =====================
 def surf_loop(api_key, initial_session):
     session = initial_session
     consecutive_failures = 0
     captcha_counter = 0
 
-    # Stabilizzazione iniziale: visita la dashboard e attendi
-    log("🌐 Stabilizzazione sessione...")
-    try:
-        session.get("https://www.easyhits4u.com/member/", verify=False, timeout=15)
-        time.sleep(5)
-        session.get("https://www.easyhits4u.com/surf/", verify=False, timeout=15)
-        time.sleep(3)
-    except Exception as e:
-        log(f"⚠️ Errore durante stabilizzazione: {e}")
+    # Inizializza la sessione di surfing
+    if not init_surf_session(session):
+        log("❌ Impossibile inizializzare la sessione di surfing")
+        return
 
     while True:
         try:
@@ -334,34 +350,27 @@ def surf_loop(api_key, initial_session):
                 verify=False, timeout=REQUEST_TIMEOUT
             )
             if r.status_code != 200:
-                log(f"⚠️ Status {r.status_code} - cookie scaduto?")
+                log(f"⚠️ Status {r.status_code}")
                 consecutive_failures += 1
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    log(f"❌ Troppi fallimenti consecutivi ({consecutive_failures}), esco.")
                     break
-                log(f"🔄 Tentativo di rilogin (fallimenti={consecutive_failures})...")
-                new_session = do_login(api_key)
-                if new_session:
-                    session = new_session
-                    # Ristabilizza
-                    session.get("https://www.easyhits4u.com/member/", verify=False, timeout=15)
-                    time.sleep(5)
-                    continue
-                else:
-                    log("❌ Rilogin fallito, esco.")
-                    break
+                time.sleep(5)
+                continue
 
             data = r.json()
+            # LOG PER DEBUG: stampiamo la risposta
+            log(f"DEBUG risposta: {json.dumps(data, indent=2)[:500]}")
+
             urlid = data.get("surfses", {}).get("urlid")
             qpic = data.get("surfses", {}).get("qpic")
             seconds = int(data.get("surfses", {}).get("seconds", 20))
             picmap = data.get("picmap", [])
 
             if not urlid or not qpic or not picmap or len(picmap) < 5:
-                log("⚠️ Dati incompleti, attendo e riprovo...")
+                log("⚠️ Dati incompleti, riprovo tra 10 secondi")
                 consecutive_failures += 1
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    log(f"❌ Troppi fallimenti consecutivi ({consecutive_failures}), esco.")
+                    log("❌ Troppi fallimenti consecutivi, esco.")
                     break
                 time.sleep(10)
                 continue
@@ -388,7 +397,6 @@ def surf_loop(api_key, initial_session):
                 salva_errore(qpic, img, picmap, labels, None, "nessun_duplicato", urlid)
                 consecutive_failures += 1
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    log("Troppi errori di riconoscimento consecutivi, esco.")
                     break
                 time.sleep(5)
                 continue
@@ -402,27 +410,25 @@ def surf_loop(api_key, initial_session):
             )
             resp_json = resp.json()
             if resp_json.get("warning") == "wrong_choice":
-                log("❌ Wrong choice - salvo errore")
+                log("❌ Wrong choice")
                 salva_errore(qpic, img, picmap, labels, chosen_idx, "wrong_choice", urlid)
                 consecutive_failures += 1
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    log("Troppi wrong choice consecutivi, esco.")
                     break
                 time.sleep(5)
                 continue
 
             captcha_counter += 1
-            log(f"✅ OK - indice {chosen_idx} - Totale captcha: {captcha_counter}")
+            log(f"✅ OK - indice {chosen_idx} - Totale: {captcha_counter}")
             if captcha_counter % 10 == 0:
                 gc.collect()
-                log(f"🧹 Garbage collection eseguita (captcha {captcha_counter})")
+                log("🧹 Garbage collection")
             time.sleep(2)
 
         except Exception as e:
-            log(f"❌ Eccezione generica: {e}")
+            log(f"❌ Eccezione: {e}")
             consecutive_failures += 1
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                log("Troppe eccezioni consecutive, esco.")
                 break
             time.sleep(10)
 
@@ -430,34 +436,34 @@ def surf_loop(api_key, initial_session):
 
 # ================ MAIN =====================
 def main():
-    log("=" * 50)
-    log("🚀 EasyHits4U Bot - Login + Autosurf con stabilizzazione")
-    log("=" * 50)
+    log("="*50)
+    log("🚀 EasyHits4U Bot - Login + Autosurf (con init surf)")
+    log("="*50)
 
     max_keys_to_try = 5
     for attempt in range(max_keys_to_try):
         api_key = get_working_key()
         if not api_key:
-            log("❌ Nessuna chiave disponibile, esco")
+            log("❌ Nessuna chiave disponibile")
             return
 
         log(f"🔑 Tentativo {attempt+1}/{max_keys_to_try} con chiave {api_key[:10]}...")
         session = do_login(api_key)
         if session:
-            log("✅ Login riuscito, carico dataset...")
+            log("✅ Login riuscito")
             if not load_dataset_hf():
-                log("❌ Dataset non caricato, abort")
+                log("❌ Dataset non caricato")
                 release_key(api_key, 'broken')
-                return
+                continue
             log("🚀 Avvio surf loop")
             surf_loop(api_key, session)
             release_key(api_key, 'used')
             return
         else:
-            log(f"❌ Login fallito, marco chiave come broken")
+            log("❌ Login fallito")
             release_key(api_key, 'broken')
 
-    log("❌ Nessuna chiave ha funzionato dopo {max_keys_to_try} tentativi")
+    log("❌ Nessuna chiave funzionante")
 
 if __name__ == "__main__":
     main()
