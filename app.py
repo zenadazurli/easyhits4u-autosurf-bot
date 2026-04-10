@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# app.py - Login + Autosurf con gestione redirect e debug cookie
+# app.py - Login + Autosurf con recupero sesids e gestione redirect
 
 import os
 import time
@@ -111,7 +111,7 @@ def release_key(api_key, new_status='used'):
     except Exception as e:
         log(f"   ⚠️ Errore rilascio: {e}")
 
-# ================ LOGIN (Browserless BQL) =====================
+# ================ LOGIN (Browserless BQL) con recupero sesids =====================
 def get_cf_token(api_key):
     query = """
     mutation {
@@ -165,29 +165,29 @@ def do_login(api_key):
     }
     session.get(REFERER_URL)
     resp = session.post("https://www.easyhits4u.com/logon/", data=data, headers=headers, allow_redirects=True, timeout=30)
+    # Dopo la POST, visitiamo la dashboard per ottenere tutti i cookie (incluso sesids)
+    try:
+        dashboard = session.get("https://www.easyhits4u.com/member/", verify=False, timeout=15)
+        log(f"   🌐 Dashboard visitata, status {dashboard.status_code}")
+        time.sleep(2)
+    except Exception as e:
+        log(f"   ⚠️ Errore dashboard: {e}")
+
     final_cookies = session.cookies.get_dict()
-    if 'user_id' in final_cookies:
-        log(f"   ✅ Login OK! user_id: {final_cookies['user_id']}")
+    if 'user_id' in final_cookies and 'sesids' in final_cookies:
+        log(f"   ✅ Login OK! user_id: {final_cookies['user_id']}, sesids: {final_cookies['sesids']}")
         log(f"   🍪 Cookie: {final_cookies}")
-        # Header per le richieste AJAX
         session.headers.update({
             'Referer': 'https://www.easyhits4u.com/surf/',
             'X-Requested-With': 'XMLHttpRequest'
         })
         return session
-    return None
+    else:
+        log(f"   ❌ Cookie mancanti: user_id={final_cookies.get('user_id')}, sesids={final_cookies.get('sesids')}")
+        return None
 
 # ================ INIZIALIZZAZIONE SESSIONE SURF =====================
 def init_surf_session(session):
-    log("🌐 Navigazione dashboard...")
-    try:
-        r = session.get("https://www.easyhits4u.com/member/", verify=False, timeout=15)
-        if r.status_code != 200:
-            log(f"   ⚠️ Dashboard risponde {r.status_code}")
-        time.sleep(2)
-    except Exception as e:
-        log(f"   ❌ Errore dashboard: {e}")
-
     log("🌐 Inizializzazione surfing...")
     try:
         r = session.get("https://www.easyhits4u.com/surf/", verify=False, timeout=15)
@@ -339,14 +339,12 @@ def surf_loop(api_key, initial_session):
     consecutive_failures = 0
     captcha_counter = 0
 
-    # Inizializza la sessione di surfing
     if not init_surf_session(session):
         log("❌ Impossibile inizializzare surfing, esco")
         return
 
     while True:
         try:
-            # Aggiungi timestamp per simulare AJAX
             timestamp = int(time.time() * 1000)
             r = session.post(
                 f"https://www.easyhits4u.com/surf/?ajax=1&try=1&_={timestamp}",
@@ -363,7 +361,6 @@ def surf_loop(api_key, initial_session):
             data = r.json()
             log(f"DEBUG risposta: {json.dumps(data, indent=2)[:500]}")
 
-            # Gestione redirect
             if data.get("redirect"):
                 log(f"⚠️ Richiesta reindirizzata a {data['redirect']}")
                 consecutive_failures += 1
@@ -374,7 +371,6 @@ def surf_loop(api_key, initial_session):
                 new_session = do_login(api_key)
                 if new_session:
                     session = new_session
-                    # Riavviamo la procedura di inizializzazione
                     if not init_surf_session(session):
                         log("❌ Re-inizializzazione fallita")
                         break
@@ -458,7 +454,7 @@ def surf_loop(api_key, initial_session):
 # ================ MAIN =====================
 def main():
     log("="*50)
-    log("🚀 EasyHits4U Bot - Login + Autosurf (con gestione redirect)")
+    log("🚀 EasyHits4U Bot - Login + Autosurf (recupero sesids)")
     log("="*50)
 
     max_keys_to_try = 5
@@ -471,7 +467,7 @@ def main():
         log(f"🔑 Tentativo {attempt+1}/{max_keys_to_try} con chiave {api_key[:10]}...")
         session = do_login(api_key)
         if session:
-            log("✅ Login riuscito")
+            log("✅ Login riuscito con sesids")
             if not load_dataset_hf():
                 log("❌ Dataset non caricato")
                 release_key(api_key, 'broken')
@@ -481,7 +477,7 @@ def main():
             release_key(api_key, 'used')
             return
         else:
-            log("❌ Login fallito")
+            log("❌ Login fallito (cookie sesids mancante)")
             release_key(api_key, 'broken')
 
     log("❌ Nessuna chiave funzionante")
