@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# app.py - Login + Autosurf con inizializzazione corretta della sessione di surfing
+# app.py - Login + Autosurf con inizializzazione sessione e FAISS incrementale
 
 import os
 import time
@@ -168,7 +168,6 @@ def do_login(api_key):
     final_cookies = session.cookies.get_dict()
     if 'user_id' in final_cookies:
         log(f"   ✅ Login OK! user_id: {final_cookies['user_id']}")
-        # Header per le richieste AJAX
         session.headers.update({
             'Referer': 'https://www.easyhits4u.com/surf/',
             'X-Requested-With': 'XMLHttpRequest'
@@ -178,30 +177,27 @@ def do_login(api_key):
 
 # ================ INIZIALIZZAZIONE SESSIONE SURF =====================
 def init_surf_session(session):
-    """Visita la pagina /surf/ per inizializzare la sessione e ottenere eventuali token"""
     log("🌐 Inizializzazione sessione surfing...")
     try:
         r = session.get("https://www.easyhits4u.com/surf/", verify=False, timeout=15)
         if r.status_code == 200:
-            # Cerca eventuale token CSRF (es. name="csrf_token")
             match = re.search(r'name="csrf_token"\s+value="([^"]+)"', r.text)
             if match:
                 csrf = match.group(1)
                 session.headers.update({'X-CSRF-Token': csrf})
                 log(f"   ✅ CSRF token trovato: {csrf[:10]}...")
             else:
-                log("   ℹ️ Nessun CSRF token trovato (forse non serve)")
-            # Aggiungi altri cookie che potrebbero essere settati
+                log("   ℹ️ Nessun CSRF token")
             time.sleep(2)
             return True
         else:
-            log(f"   ⚠️ GET /surf/ risponde con {r.status_code}")
+            log(f"   ⚠️ GET /surf/ risponde {r.status_code}")
             return False
     except Exception as e:
         log(f"   ❌ Errore init: {e}")
         return False
 
-# ================ DATASET HUGGING FACE (FAISS) =====================
+# ================ DATASET HUGGING FACE - VERSIONE INCREMENTALE =====================
 def load_dataset_hf():
     global dataset, classes_fast, faiss_index
     log("📥 Caricamento dataset da Hugging Face Hub...")
@@ -212,19 +208,17 @@ def load_dataset_hf():
         class_names = dataset.features['y'].names
         classes_fast = {i: name for i, name in enumerate(class_names)}
         
-        log("🔧 Costruzione indice FAISS (FlatL2)...")
-        X_list = []
-        batch_size = 500
-        for i in range(0, len(dataset), batch_size):
-            batch = dataset[i:i+batch_size]
-            X_list.append(np.array(batch['X'], dtype=np.float32))
-        X_all = np.vstack(X_list)
-        log(f"📊 Vettori caricati: {X_all.shape}")
+        log("🔧 Costruzione indice FAISS (FlatL2) incrementale...")
         index = faiss.IndexFlatL2(vector_dim)
-        index.add(X_all)
+        batch_size = 5000
+        total = len(dataset)
+        for i in range(0, total, batch_size):
+            batch = dataset[i:i+batch_size]
+            X_batch = np.array(batch['X'], dtype=np.float32)
+            index.add(X_batch)
+            log(f"   Aggiunti {len(X_batch)} vettori, totale {index.ntotal}/{total}")
         log(f"✅ Indice FAISS creato con {index.ntotal} vettori")
         faiss_index = index
-        del X_list, X_all
         gc.collect()
         return True
     except Exception as e:
@@ -334,14 +328,12 @@ def surf_loop(api_key, initial_session):
     consecutive_failures = 0
     captcha_counter = 0
 
-    # Inizializza la sessione di surfing
     if not init_surf_session(session):
-        log("❌ Impossibile inizializzare la sessione di surfing")
+        log("❌ Impossibile inizializzare surfing")
         return
 
     while True:
         try:
-            # Ping alla homepage per mantenere sessione
             session.get("https://www.easyhits4u.com", verify=False, timeout=10)
             time.sleep(1)
 
@@ -358,7 +350,6 @@ def surf_loop(api_key, initial_session):
                 continue
 
             data = r.json()
-            # LOG PER DEBUG: stampiamo la risposta
             log(f"DEBUG risposta: {json.dumps(data, indent=2)[:500]}")
 
             urlid = data.get("surfses", {}).get("urlid")
@@ -370,7 +361,6 @@ def surf_loop(api_key, initial_session):
                 log("⚠️ Dati incompleti, riprovo tra 10 secondi")
                 consecutive_failures += 1
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    log("❌ Troppi fallimenti consecutivi, esco.")
                     break
                 time.sleep(10)
                 continue
