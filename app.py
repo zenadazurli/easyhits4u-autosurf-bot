@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# app.py - Login + Autosurf con Browserless BQL (stessa sessione)
+# app.py - Login + Autosurf con Browserless BQL (solo requests)
 
 import requests
 import json
@@ -23,12 +23,11 @@ EASYHITS_EMAIL = "sandrominori50+uiszuzoqatr@gmail.com"
 EASYHITS_PASSWORD = "DDnmVV45!!"
 REFERER_URL = "https://www.easyhits4u.com/?ref=nicolacaporale"
 
-# Browserless endpoint
+# Browserless BQL endpoint (quello funzionante)
 BROWSERLESS_URL = "https://production-sfo.browserless.io/chrome/bql"
 
 # ==================== CHIAVI VALIDE (187) ====================
 VALID_KEYS = [
-    # Chiavi del primo test (10)
     "2TPBw78eoqITsdsc25e9ff6270092838010c06b1652627c8f",
     "2UB2mJ8Pu4KvAwya658a33c2af825bbe2f707870ba088d746",
     "2UB6xXPVzalwmFrdf68265d93b745fd095899467d21a32326",
@@ -39,7 +38,6 @@ VALID_KEYS = [
     "2UDOf1dHJeNmeOl0a373211ade4280ba7e212cde93dfc9e20",
     "2UDOnpiBIFokFEBcb1017abfdd901756272f2ff182c4a9f32",
     "2UDPWeUf62vB2I8aa37152a5b515e5360c127d669b813f23c",
-    # Chiavi del secondo test (177)
     "2UJK3J6z8WVUZCnebd8f5f45581cb8e33d54c5f102ff1ca1a",
     "2UJK4Jun2RJGbpmb4744ac717d57e27d86a6f8cdea79ecb29",
     "2UJK6yKb6025jjV0ec93e78221afdd7422cba5e9c2cf215b2",
