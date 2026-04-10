@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# app.py - Login + Autosurf per EasyHits4U con rilogin automatico e recupero sessione
+# app.py - Login + Autosurf per EasyHits4U con rilogin automatico e rotazione chiavi
 
 import os
 import time
@@ -26,7 +26,7 @@ EASYHITS_EMAIL = "sandrominori50+uiszuzoqatr@gmail.com"
 EASYHITS_PASSWORD = "DDnmVV45!!"
 REFERER_URL = "https://www.easyhits4u.com/?ref=nicolacaporale"
 
-# Supabase (variabili d'ambiente)
+# Supabase
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 
@@ -75,6 +75,7 @@ def log(msg):
 
 # ================ SUPABASE FUNCTIONS =====================
 def get_working_key():
+    """Recupera una chiave con status 'working' o 'available' e la marca come 'in_use'"""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         log("❌ Supabase non configurato")
         return None
@@ -308,7 +309,7 @@ def salva_errore(qpic, img, picmap, labels, chosen_idx, motivo, urlid=None):
         json.dump(metadata, f, indent=2)
     log(f"📁 Errore salvato in {folder}")
 
-# ================ SURF LOOP CON RILOGIN AUTOMATICO (MIGLIORATO) =====================
+# ================ SURF LOOP CON RILOGIN AUTOMATICO =====================
 def surf_loop(api_key, initial_session):
     session = initial_session
     consecutive_failures = 0
@@ -330,7 +331,6 @@ def surf_loop(api_key, initial_session):
                 new_session = do_login(api_key)
                 if new_session:
                     session = new_session
-                    # Riscaldamento sessione
                     time.sleep(2)
                     session.get("https://www.easyhits4u.com", verify=False, timeout=10)
                     time.sleep(1)
@@ -363,7 +363,6 @@ def surf_loop(api_key, initial_session):
                     log("❌ Rilogin fallito, esco.")
                     break
 
-            # Dati validi → reset fallimenti
             consecutive_failures = 0
 
             img_data = session.get(f"https://www.easyhits4u.com/simg/{qpic}.jpg", verify=False).content
@@ -457,26 +456,31 @@ def main():
     log("🚀 EasyHits4U Bot - Login + Autosurf con rilogin automatico")
     log("=" * 50)
 
-    api_key = get_working_key()
-    if not api_key:
-        log("❌ Impossibile proseguire senza chiave")
-        return
+    max_keys_to_try = 5
+    for attempt in range(max_keys_to_try):
+        api_key = get_working_key()
+        if not api_key:
+            log("❌ Nessuna chiave disponibile, esco")
+            return
 
-    session = do_login(api_key)
-    if not session:
-        log("❌ Login fallito, rilascio chiave come broken")
-        release_key(api_key, 'broken')
-        return
+        log(f"🔑 Tentativo {attempt+1}/{max_keys_to_try} con chiave {api_key[:10]}...")
+        session = do_login(api_key)
+        if session:
+            log("✅ Login riuscito, carico dataset...")
+            if not load_dataset_hf():
+                log("❌ Dataset non caricato, abort")
+                release_key(api_key, 'broken')
+                return
+            log("🚀 Avvio surf loop")
+            surf_loop(api_key, session)
+            release_key(api_key, 'used')
+            return
+        else:
+            log(f"❌ Login fallito, marco chiave come broken")
+            release_key(api_key, 'broken')
+            # continua con la prossima chiave
 
-    if not load_dataset_hf():
-        log("❌ Dataset non caricato, abort")
-        release_key(api_key, 'broken')
-        return
-
-    surf_loop(api_key, session)
-
-    release_key(api_key, 'used')
-    log("🏁 Bot terminato, in attesa di riavvio")
+    log("❌ Nessuna chiave ha funzionato dopo {max_keys_to_try} tentativi")
 
 if __name__ == "__main__":
     main()
