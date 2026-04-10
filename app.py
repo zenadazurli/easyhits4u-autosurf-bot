@@ -1,105 +1,86 @@
 #!/usr/bin/env python3
-# app.py - Login (identico al funzionante) + Autosurf
+# app.py - Surfing completo con Selenium (niente requests)
 
-import requests
-import json
-import time
 import os
+import time
+import threading
+import gc
 import cv2
 import numpy as np
 import faiss
-import gc
+import base64
 from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from datasets import load_dataset
 
-# ==================== CONFIGURAZIONE ====================
+# ================ CONFIG =====================
 DIM = 64
-REQUEST_TIMEOUT = 15
-ERRORI_DIR = "/tmp/errori"
+HEALTH_CHECK_PORT = int(os.environ.get('PORT', 10000))
 MAX_CONSECUTIVE_FAILURES = 5
 
 EASYHITS_EMAIL = "sandrominori50+uiszuzoqatr@gmail.com"
 EASYHITS_PASSWORD = "DDnmVV45!!"
-REFERER_URL = "https://www.easyhits4u.com/?ref=nicolacaporale"
-BROWSERLESS_URL = "https://production-sfo.browserless.io/chrome/bql"
 
-# Chiavi valide (solo le prime 10 per test, poi aggiungi tutte)
-VALID_KEYS = [
+# Browserless WebSocket endpoint (per Selenium)
+BROWSERLESS_KEYS = [
     "2TPBw78eoqITsdsc25e9ff6270092838010c06b1652627c8f",
     "2UB2mJ8Pu4KvAwya658a33c2af825bbe2f707870ba088d746",
     "2UB6xXPVzalwmFrdf68265d93b745fd095899467d21a32326",
     "2UB72G0jNe5RsxL6b2e845d0b94bb6897966e88f662bc99a7",
     "2UCe01EH3vUJLnP6d3f028660d770ed840a0c6b05b6dcf71e",
+    "2UCyusO830dLAcyda29244c83c2bfa0217728908ff8810c42",
+    "2UD3pQCcge39YhQce5797773c8508515a295a1298d0105b42",
+    "2UDOf1dHJeNmeOl0a373211ade4280ba7e212cde93dfc9e20",
+    "2UDOnpiBIFokFEBcb1017abfdd901756272f2ff182c4a9f32",
+    "2UDPWeUf62vB2I8aa37152a5b515e5360c127d669b813f23c",
 ]
 
 dataset = None
 classes_fast = None
 faiss_index = None
 vector_dim = 33
+server_ready = False
+
+# ================ HEALTH CHECK =====================
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+            self.end_headers()
+    def log_message(self, format, *args):
+        pass
+
+def run_health_server():
+    global server_ready
+    try:
+        server = HTTPServer(('0.0.0.0', HEALTH_CHECK_PORT), HealthHandler)
+        server_ready = True
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🏥 Health check avviato su porta {HEALTH_CHECK_PORT}")
+        server.serve_forever()
+    except Exception as e:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Health check error: {e}")
+        server_ready = False
+
+health_thread = threading.Thread(target=run_health_server, daemon=True)
+health_thread.start()
+timeout = 10
+while not server_ready and timeout > 0:
+    time.sleep(0.5)
+    timeout -= 0.5
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ==================== IDENTICO AL REPOSITORY DI LOGIN ====================
-def get_cf_token(api_key):
-    query = """
-    mutation {
-      goto(url: "https://www.easyhits4u.com/logon/", waitUntil: networkIdle, timeout: 60000) {
-        status
-      }
-      solve(type: cloudflare, timeout: 60000) {
-        solved
-        token
-        time
-      }
-    }
-    """
-    url = f"{BROWSERLESS_URL}?token={api_key}"
-    try:
-        start = time.time()
-        response = requests.post(url, json={"query": query}, headers={"Content-Type": "application/json"}, timeout=120)
-        if response.status_code != 200:
-            return None
-        data = response.json()
-        if "errors" in data:
-            return None
-        solve_info = data.get("data", {}).get("solve", {})
-        if solve_info.get("solved"):
-            token = solve_info.get("token")
-            log(f"   ✅ Token ({time.time()-start:.1f}s)")
-            return token
-        return None
-    except Exception as e:
-        log(f"   ❌ Errore token: {e}")
-        return None
-
-def login_with_token(token):
-    """IDENTICO al repository di login - restituisce i cookie"""
-    session = requests.Session()
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/148.0',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Referer': REFERER_URL,
-    }
-    data = {
-        'manual': '1',
-        'fb_id': '',
-        'fb_token': '',
-        'google_code': '',
-        'username': EASYHITS_EMAIL,
-        'password': EASYHITS_PASSWORD,
-        'cf-turnstile-response': token,
-    }
-    session.get(REFERER_URL)
-    response = session.post("https://www.easyhits4u.com/logon/", data=data, headers=headers, allow_redirects=True, timeout=30)
-    final_cookies = session.cookies.get_dict()
-    
-    if 'user_id' in final_cookies:
-        log(f"   ✅ Login OK! user_id: {final_cookies['user_id']}, sesids: {final_cookies.get('sesids', 'NON TROVATO')}")
-        return session  # RESTITUISCO LA SESSIONE, NON SOLO I COOKIE
-    return None
-
-# ==================== DATASET ====================
+# ================ DATASET =====================
 def load_dataset_hf():
     global dataset, classes_fast, faiss_index
     log("📥 Caricamento dataset...")
@@ -125,7 +106,7 @@ def load_dataset_hf():
         log(f"❌ Errore dataset: {e}")
         return False
 
-# ==================== FUNZIONI DI RICONOSCIMENTO (invariate) ====================
+# ================ FUNZIONI FEATURE =====================
 def centra_figura(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
@@ -181,177 +162,156 @@ def predict(img_crop):
     true_label_idx = dataset['y'][best_idx]
     return classes_fast.get(int(true_label_idx), "errore")
 
-def crop_safe(img, coords):
+def solve_captcha_with_selenium(driver, wait):
+    """Riconosce le figure e clicca su quella duplicata"""
     try:
-        x1, y1, x2, y2 = map(int, coords.split(","))
-    except:
-        return None
-    h, w = img.shape[:2]
-    x1 = max(0, min(w-1, x1))
-    x2 = max(0, min(w, x2))
-    y1 = max(0, min(h-1, y1))
-    y2 = max(0, min(h, y2))
-    if x2 <= x1 or y2 <= y1:
-        return None
-    return img[y1:y2, x1:x2]
-
-def salva_errore(qpic, img, picmap, labels, chosen_idx, motivo, urlid=None):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    folder = os.path.join(ERRORI_DIR, f"{timestamp}_{qpic}")
-    os.makedirs(folder, exist_ok=True)
-    full_path = os.path.join(folder, "full.jpg")
-    cv2.imwrite(full_path, img)
-    for i, p in enumerate(picmap):
-        crop = crop_safe(img, p.get("coords", ""))
-        if crop is not None and crop.size > 0:
-            cv2.imwrite(os.path.join(folder, f"crop_{i+1}.jpg"), crop)
-    metadata = {
-        "timestamp": timestamp,
-        "qpic": qpic,
-        "urlid": urlid,
-        "motivo": motivo,
-        "labels_predette": labels,
-        "chosen_idx": chosen_idx,
-        "picmap_values": [p.get("value") for p in picmap] if picmap else []
-    }
-    with open(os.path.join(folder, "metadata.json"), "w") as f:
-        json.dump(metadata, f, indent=2)
-    log(f"📁 Errore salvato in {folder}")
-
-# ==================== SURF LOOP ====================
-def surf_loop(session):
-    consecutive_failures = 0
-    captcha_counter = 0
-
-    log("🌐 Inizializzazione /surf/...")
-    try:
-        r = session.get("https://www.easyhits4u.com/surf/", verify=False, timeout=15)
-        log(f"   /surf/ status: {r.status_code}")
-        time.sleep(3)
-    except Exception as e:
-        log(f"   ⚠️ Errore init: {e}")
-
-    while True:
-        try:
-            timestamp = int(time.time() * 1000)
-            r = session.post(
-                f"https://www.easyhits4u.com/surf/?ajax=1&try=1&_={timestamp}",
-                verify=False, timeout=REQUEST_TIMEOUT
-            )
-            if r.status_code != 200:
-                log(f"⚠️ Status {r.status_code}")
-                consecutive_failures += 1
-                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    break
-                time.sleep(5)
+        # Attendi che le immagini siano caricate
+        images = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "img[src*='/simg/']")))
+        if len(images) < 5:
+            log(f"   ⚠️ Solo {len(images)} immagini trovate")
+            return False
+        
+        labels = []
+        for idx, img_elem in enumerate(images[:5]):
+            src = img_elem.get_attribute("src")
+            if not src:
                 continue
+            # Scarica immagine via Selenium
+            img_data = driver.execute_script("""
+                var xhr = new XMLHttpRequest();
+                xhr.open('GET', arguments[0], false);
+                xhr.responseType = 'blob';
+                xhr.send();
+                var reader = new FileReader();
+                reader.readAsDataURL(xhr.response);
+                return reader.result;
+            """, src)
+            img_data = img_data.split(',')[1]
+            img_bytes = base64.b64decode(img_data)
+            nparr = np.frombuffer(img_bytes, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            label = predict(img)
+            labels.append(label)
+        
+        log(f"   Labels: {labels}")
+        
+        # Trova duplicato
+        seen = {}
+        chosen_idx = None
+        for i, label in enumerate(labels):
+            if label and label != "errore":
+                if label in seen:
+                    chosen_idx = seen[label]
+                    break
+                seen[label] = i
+        
+        if chosen_idx is None:
+            log("   ❌ Nessun duplicato trovato")
+            return False
+        
+        # Clicca sull'immagine duplicata
+        images[chosen_idx].click()
+        return True
+        
+    except Exception as e:
+        log(f"   ❌ Errore riconoscimento: {e}")
+        return False
 
-            data = r.json()
-            
-            if data.get("redirect"):
-                log(f"⚠️ Sessione scaduta (redirect a {data['redirect']})")
-                break
-
-            urlid = data.get("surfses", {}).get("urlid")
-            qpic = data.get("surfses", {}).get("qpic")
-            seconds = int(data.get("surfses", {}).get("seconds", 20))
-            picmap = data.get("picmap", [])
-
-            if not urlid or not qpic or not picmap or len(picmap) < 5:
-                log("⚠️ Dati incompleti, riprovo tra 10 secondi")
+def surf_loop_selenium(api_key):
+    browserless_url = f"wss://chrome.browserless.io?token={api_key}"
+    options = webdriver.ChromeOptions()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    
+    driver = None
+    try:
+        driver = webdriver.Remote(command_executor=browserless_url, options=options)
+        wait = WebDriverWait(driver, 30)
+        
+        # Login
+        log("🌐 Login...")
+        driver.get("https://www.easyhits4u.com")
+        login_btn = wait.until(EC.element_to_be_clickable((By.LINK_TEXT, "Login")))
+        login_btn.click()
+        
+        username_field = wait.until(EC.presence_of_element_located((By.NAME, "username")))
+        password_field = driver.find_element(By.NAME, "password")
+        username_field.send_keys(EASYHITS_EMAIL)
+        password_field.send_keys(EASYHITS_PASSWORD)
+        submit_btn = driver.find_element(By.XPATH, "//input[@type='submit']")
+        submit_btn.click()
+        
+        # Attendi il redirect dopo login
+        time.sleep(5)
+        log("✅ Login effettuato")
+        
+        # Vai alla pagina di surfing
+        driver.get("https://www.easyhits4u.com/surf/")
+        time.sleep(3)
+        
+        captcha_counter = 0
+        consecutive_failures = 0
+        
+        while True:
+            try:
+                # Clicca su "Start Surfing" se presente
+                start_btn = driver.find_elements(By.XPATH, "//button[contains(text(), 'Start')]")
+                if start_btn:
+                    start_btn[0].click()
+                    time.sleep(2)
+                
+                # Risolvi il captcha
+                success = solve_captcha_with_selenium(driver, wait)
+                if success:
+                    captcha_counter += 1
+                    log(f"✅ Captcha risolto! Totale: {captcha_counter}")
+                    consecutive_failures = 0
+                    time.sleep(5)
+                else:
+                    consecutive_failures += 1
+                    log(f"❌ Fallito ({consecutive_failures}/{MAX_CONSECUTIVE_FAILURES})")
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                        break
+                    time.sleep(10)
+                
+                if captcha_counter % 10 == 0:
+                    gc.collect()
+                    
+            except Exception as e:
+                log(f"❌ Errore nel loop: {e}")
                 consecutive_failures += 1
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                     break
                 time.sleep(10)
-                continue
+                
+    except Exception as e:
+        log(f"❌ Errore fatale: {e}")
+    finally:
+        if driver:
+            driver.quit()
 
-            consecutive_failures = 0
-
-            img_data = session.get(f"https://www.easyhits4u.com/simg/{qpic}.jpg", verify=False).content
-            img = cv2.imdecode(np.frombuffer(img_data, np.uint8), cv2.IMREAD_COLOR)
-            crops = [crop_safe(img, p.get("coords", "")) for p in picmap]
-            labels = [predict(c) for c in crops]
-            log(f"Labels: {labels}")
-
-            seen = {}
-            chosen_idx = None
-            for i, label in enumerate(labels):
-                if label and label != "errore":
-                    if label in seen:
-                        chosen_idx = seen[label]
-                        break
-                    seen[label] = i
-
-            if chosen_idx is None:
-                log("❌ Nessun duplicato trovato")
-                salva_errore(qpic, img, picmap, labels, None, "nessun_duplicato", urlid)
-                consecutive_failures += 1
-                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    break
-                time.sleep(5)
-                continue
-
-            time.sleep(seconds)
-            word = picmap[chosen_idx]["value"]
-            resp = session.get(
-                f"https://www.easyhits4u.com/surf/?f=surf&urlid={urlid}&surftype=2"
-                f"&ajax=1&word={word}&screen_width=1024&screen_height=768",
-                verify=False
-            )
-            resp_json = resp.json()
-            if resp_json.get("warning") == "wrong_choice":
-                log("❌ Wrong choice")
-                salva_errore(qpic, img, picmap, labels, chosen_idx, "wrong_choice", urlid)
-                consecutive_failures += 1
-                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    break
-                time.sleep(5)
-                continue
-
-            captcha_counter += 1
-            log(f"✅ OK - indice {chosen_idx} - Totale: {captcha_counter}")
-            if captcha_counter % 10 == 0:
-                gc.collect()
-                log("🧹 Garbage collection")
-            time.sleep(2)
-
-        except Exception as e:
-            log(f"❌ Eccezione: {e}")
-            consecutive_failures += 1
-            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                break
-            time.sleep(10)
-
-    log("🏁 Surf loop terminato")
-
-# ==================== MAIN ====================
+# ================ MAIN =====================
 def main():
-    log("=" * 50)
-    log("🚀 LOGIN + AUTOSURF (IDENTICO AL REPOSITORY FUNZIONANTE)")
-    log("=" * 50)
+    log("="*50)
+    log("🚀 EasyHits4U Bot - Surfing completo con Selenium")
+    log("="*50)
     
     if not load_dataset_hf():
         log("❌ Dataset non caricato")
         return
     
-    for api_key in VALID_KEYS:
-        log(f"🔑 Tentativo con chiave: {api_key[:10]}...")
-        
-        token = get_cf_token(api_key)
-        if not token:
-            log(f"   ❌ Token non ottenuto")
+    for api_key in BROWSERLESS_KEYS:
+        log(f"🔑 Tentativo con chiave {api_key[:10]}...")
+        try:
+            surf_loop_selenium(api_key)
+            log("✅ Surf loop completato con questa chiave")
+            return
+        except Exception as e:
+            log(f"❌ Errore con chiave {api_key[:10]}: {e}")
             continue
-        
-        session = login_with_token(token)
-        if session:
-            log("✅ Login riuscito! Avvio surf loop...")
-            surf_loop(session)
-            log("🔄 Sessione scaduta, provo altra chiave...")
-            continue
-        else:
-            log(f"   ❌ Login fallito")
     
-    log("❌ Login fallito con tutte le chiavi")
+    log("❌ Nessuna chiave funzionante")
 
 if __name__ == "__main__":
     main()
