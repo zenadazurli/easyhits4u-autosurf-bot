@@ -21,7 +21,7 @@ ERRORI_DIR = "/tmp/errori"
 HEALTH_CHECK_PORT = int(os.environ.get('PORT', 10000))
 MAX_CONSECUTIVE_FAILURES = 3
 
-# Credenziali EasyHits4U (aggiornate)
+# Credenziali EasyHits4U
 EASYHITS_EMAIL = "sandrominori50+uiszuzoqatr@gmail.com"
 EASYHITS_PASSWORD = "DDnmVV45!!"
 REFERER_URL = "https://www.easyhits4u.com/?ref=nicolacaporale"
@@ -75,14 +75,16 @@ def log(msg):
 
 # ================ SUPABASE FUNCTIONS =====================
 def get_working_key():
+    """Recupera una chiave con status 'working' o 'available' e la marca come 'in_use'"""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         log("❌ Supabase non configurato")
         return None
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        # MODIFICA: accetta sia 'working' che 'available'
         resp = supabase.table('browserless_keys')\
             .select('id', 'api_key')\
-            .eq('status', 'working')\
+            .in_('status', ['working', 'available'])\
             .limit(1)\
             .execute()
         if resp.data:
@@ -92,10 +94,10 @@ def get_working_key():
                 .update({'status': 'in_use'})\
                 .eq('id', key_id)\
                 .execute()
-            log(f"📦 Chiave ottenuta: {api_key[:10]}...")
+            log(f"📦 Chiave ottenuta: {api_key[:10]}... (status: in_use)")
             return api_key
         else:
-            log("❌ Nessuna chiave 'working' disponibile")
+            log("❌ Nessuna chiave 'working' o 'available' disponibile")
             return None
     except Exception as e:
         log(f"❌ Errore Supabase: {e}")
