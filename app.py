@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# app.py - Login + Autosurf con recupero sesids e gestione redirect
+# app.py - Login con Selenium + Browserless, poi autosurf con requests
 
 import os
 import time
 import json
 import threading
 import gc
-import re
 import requests
 import numpy as np
 import cv2
@@ -14,6 +13,10 @@ import faiss
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from supabase import create_client
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 # ================ CONFIG =====================
 DIM = 64
@@ -111,104 +114,52 @@ def release_key(api_key, new_status='used'):
     except Exception as e:
         log(f"   ⚠️ Errore rilascio: {e}")
 
-# ================ LOGIN (Browserless BQL) con recupero sesids =====================
-def get_cf_token(api_key):
-    query = """
-    mutation {
-      goto(url: "https://www.easyhits4u.com/logon/", waitUntil: networkIdle, timeout: 60000) {
-        status
-      }
-      solve(type: cloudflare, timeout: 60000) {
-        solved
-        token
-        time
-      }
-    }
-    """
-    url = f"https://production-sfo.browserless.io/chrome/bql?token={api_key}"
+# ================ LOGIN CON SELENIUM (Browserless) =====================
+def do_login_selenium(api_key):
+    browserless_url = f"wss://chrome.browserless.io?token={api_key}"
+    options = webdriver.ChromeOptions()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    driver = None
     try:
-        start = time.time()
-        response = requests.post(url, json={"query": query}, headers={"Content-Type": "application/json"}, timeout=120)
-        if response.status_code != 200:
-            return None
-        data = response.json()
-        if "errors" in data:
-            return None
-        solve_info = data.get("data", {}).get("solve", {})
-        if solve_info.get("solved"):
-            token = solve_info.get("token")
-            log(f"   ✅ Token ({time.time()-start:.1f}s)")
-            return token
-        return None
-    except Exception as e:
-        log(f"   ❌ Token error: {e}")
-        return None
-
-def do_login(api_key):
-    token = get_cf_token(api_key)
-    if not token:
-        return None
-    session = requests.Session()
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/148.0',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Referer': REFERER_URL,
-    }
-    data = {
-        'manual': '1',
-        'fb_id': '',
-        'fb_token': '',
-        'google_code': '',
-        'username': EASYHITS_EMAIL,
-        'password': EASYHITS_PASSWORD,
-        'cf-turnstile-response': token,
-    }
-    session.get(REFERER_URL)
-    resp = session.post("https://www.easyhits4u.com/logon/", data=data, headers=headers, allow_redirects=True, timeout=30)
-    # Dopo la POST, visitiamo la dashboard per ottenere tutti i cookie (incluso sesids)
-    try:
-        dashboard = session.get("https://www.easyhits4u.com/member/", verify=False, timeout=15)
-        log(f"   🌐 Dashboard visitata, status {dashboard.status_code}")
-        time.sleep(2)
-    except Exception as e:
-        log(f"   ⚠️ Errore dashboard: {e}")
-
-    final_cookies = session.cookies.get_dict()
-    if 'user_id' in final_cookies and 'sesids' in final_cookies:
-        log(f"   ✅ Login OK! user_id: {final_cookies['user_id']}, sesids: {final_cookies['sesids']}")
-        log(f"   🍪 Cookie: {final_cookies}")
-        session.headers.update({
-            'Referer': 'https://www.easyhits4u.com/surf/',
-            'X-Requested-With': 'XMLHttpRequest'
-        })
-        return session
-    else:
-        log(f"   ❌ Cookie mancanti: user_id={final_cookies.get('user_id')}, sesids={final_cookies.get('sesids')}")
-        return None
-
-# ================ INIZIALIZZAZIONE SESSIONE SURF =====================
-def init_surf_session(session):
-    log("🌐 Inizializzazione surfing...")
-    try:
-        r = session.get("https://www.easyhits4u.com/surf/", verify=False, timeout=15)
-        if r.status_code == 200:
-            match = re.search(r'name="csrf_token"\s+value="([^"]+)"', r.text)
-            if match:
-                csrf = match.group(1)
-                session.headers.update({'X-CSRF-Token': csrf})
-                log(f"   ✅ CSRF token trovato: {csrf[:10]}...")
-            else:
-                log("   ℹ️ Nessun CSRF token")
-            time.sleep(2)
-            return True
+        driver = webdriver.Remote(command_executor=browserless_url, options=options)
+        driver.get("https://www.easyhits4u.com")
+        wait = WebDriverWait(driver, 20)
+        login_btn = wait.until(EC.element_to_be_clickable((By.LINK_TEXT, "Login")))
+        login_btn.click()
+        username_field = wait.until(EC.presence_of_element_located((By.NAME, "username")))
+        password_field = driver.find_element(By.NAME, "password")
+        username_field.send_keys(EASYHITS_EMAIL)
+        password_field.send_keys(EASYHITS_PASSWORD)
+        submit_btn = driver.find_element(By.XPATH, "//input[@type='submit']")
+        submit_btn.click()
+        # Attendi che il login sia completato (presenza di user_id nel cookie)
+        time.sleep(5)
+        cookies = driver.get_cookies()
+        session = requests.Session()
+        for cookie in cookies:
+            session.cookies.set(cookie['name'], cookie['value'])
+        # Verifica sesids
+        if 'sesids' in session.cookies.get_dict():
+            log(f"   ✅ Login Selenium OK! sesids: {session.cookies['sesids']}")
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Referer': 'https://www.easyhits4u.com/surf/',
+                'X-Requested-With': 'XMLHttpRequest'
+            })
+            return session
         else:
-            log(f"   ⚠️ GET /surf/ risponde {r.status_code}")
-            return False
+            log("   ❌ Selenium: sesids non trovato nei cookie")
+            return None
     except Exception as e:
-        log(f"   ❌ Errore init: {e}")
-        return False
+        log(f"   ❌ Errore Selenium: {e}")
+        return None
+    finally:
+        if driver:
+            driver.quit()
 
-# ================ DATASET HUGGING FACE - VERSIONE INCREMENTALE =====================
+# ================ DATASET HUGGING FACE =====================
 def load_dataset_hf():
     global dataset, classes_fast, faiss_index
     log("📥 Caricamento dataset da Hugging Face Hub...")
@@ -236,7 +187,7 @@ def load_dataset_hf():
         log(f"❌ Errore dataset: {e}")
         return False
 
-# ================ FUNZIONI DI FEATURE EXTRACTION =====================
+# ================ FEATURE EXTRACTION (invariata) =====================
 def centra_figura(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
@@ -333,15 +284,18 @@ def salva_errore(qpic, img, picmap, labels, chosen_idx, motivo, urlid=None):
         json.dump(metadata, f, indent=2)
     log(f"📁 Errore salvato in {folder}")
 
-# ================ SURF LOOP CON GESTIONE REDIRECT =====================
-def surf_loop(api_key, initial_session):
-    session = initial_session
+# ================ SURF LOOP =====================
+def surf_loop(session):
     consecutive_failures = 0
     captcha_counter = 0
 
-    if not init_surf_session(session):
-        log("❌ Impossibile inizializzare surfing, esco")
-        return
+    # Inizializzazione surfing: visita /surf/
+    try:
+        r = session.get("https://www.easyhits4u.com/surf/", verify=False, timeout=15)
+        log(f"   Inizializzazione /surf/: {r.status_code}")
+        time.sleep(2)
+    except Exception as e:
+        log(f"   Errore init: {e}")
 
     while True:
         try:
@@ -362,22 +316,12 @@ def surf_loop(api_key, initial_session):
             log(f"DEBUG risposta: {json.dumps(data, indent=2)[:500]}")
 
             if data.get("redirect"):
-                log(f"⚠️ Richiesta reindirizzata a {data['redirect']}")
+                log(f"⚠️ Redirect a {data['redirect']}")
                 consecutive_failures += 1
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    log("❌ Troppi redirect consecutivi, esco")
                     break
-                log("🔄 Tentativo di rilogin...")
-                new_session = do_login(api_key)
-                if new_session:
-                    session = new_session
-                    if not init_surf_session(session):
-                        log("❌ Re-inizializzazione fallita")
-                        break
-                    continue
-                else:
-                    log("❌ Rilogin fallito")
-                    break
+                time.sleep(5)
+                continue
 
             urlid = data.get("surfses", {}).get("urlid")
             qpic = data.get("surfses", {}).get("qpic")
@@ -454,7 +398,7 @@ def surf_loop(api_key, initial_session):
 # ================ MAIN =====================
 def main():
     log("="*50)
-    log("🚀 EasyHits4U Bot - Login + Autosurf (recupero sesids)")
+    log("🚀 EasyHits4U Bot - Login con Selenium + Autosurf")
     log("="*50)
 
     max_keys_to_try = 5
@@ -465,7 +409,7 @@ def main():
             return
 
         log(f"🔑 Tentativo {attempt+1}/{max_keys_to_try} con chiave {api_key[:10]}...")
-        session = do_login(api_key)
+        session = do_login_selenium(api_key)
         if session:
             log("✅ Login riuscito con sesids")
             if not load_dataset_hf():
@@ -473,7 +417,7 @@ def main():
                 release_key(api_key, 'broken')
                 continue
             log("🚀 Avvio surf loop")
-            surf_loop(api_key, session)
+            surf_loop(session)
             release_key(api_key, 'used')
             return
         else:
