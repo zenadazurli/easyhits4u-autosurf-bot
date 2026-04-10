@@ -1,6 +1,4 @@
-selenium
 requests
-supabase
 opencv-python-headless
 numpy
 faiss-cpu
