@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# app.py - Login + Autosurf con inizializzazione sessione e FAISS incrementale
+# app.py - Login + Autosurf con gestione redirect e debug cookie
 
 import os
 import time
@@ -168,6 +168,8 @@ def do_login(api_key):
     final_cookies = session.cookies.get_dict()
     if 'user_id' in final_cookies:
         log(f"   ✅ Login OK! user_id: {final_cookies['user_id']}")
+        log(f"   🍪 Cookie: {final_cookies}")
+        # Header per le richieste AJAX
         session.headers.update({
             'Referer': 'https://www.easyhits4u.com/surf/',
             'X-Requested-With': 'XMLHttpRequest'
@@ -177,7 +179,16 @@ def do_login(api_key):
 
 # ================ INIZIALIZZAZIONE SESSIONE SURF =====================
 def init_surf_session(session):
-    log("🌐 Inizializzazione sessione surfing...")
+    log("🌐 Navigazione dashboard...")
+    try:
+        r = session.get("https://www.easyhits4u.com/member/", verify=False, timeout=15)
+        if r.status_code != 200:
+            log(f"   ⚠️ Dashboard risponde {r.status_code}")
+        time.sleep(2)
+    except Exception as e:
+        log(f"   ❌ Errore dashboard: {e}")
+
+    log("🌐 Inizializzazione surfing...")
     try:
         r = session.get("https://www.easyhits4u.com/surf/", verify=False, timeout=15)
         if r.status_code == 200:
@@ -225,7 +236,7 @@ def load_dataset_hf():
         log(f"❌ Errore dataset: {e}")
         return False
 
-# ================ FEATURE EXTRACTION (identica) =====================
+# ================ FUNZIONI DI FEATURE EXTRACTION =====================
 def centra_figura(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
@@ -322,23 +333,23 @@ def salva_errore(qpic, img, picmap, labels, chosen_idx, motivo, urlid=None):
         json.dump(metadata, f, indent=2)
     log(f"📁 Errore salvato in {folder}")
 
-# ================ SURF LOOP =====================
+# ================ SURF LOOP CON GESTIONE REDIRECT =====================
 def surf_loop(api_key, initial_session):
     session = initial_session
     consecutive_failures = 0
     captcha_counter = 0
 
+    # Inizializza la sessione di surfing
     if not init_surf_session(session):
-        log("❌ Impossibile inizializzare surfing")
+        log("❌ Impossibile inizializzare surfing, esco")
         return
 
     while True:
         try:
-            session.get("https://www.easyhits4u.com", verify=False, timeout=10)
-            time.sleep(1)
-
+            # Aggiungi timestamp per simulare AJAX
+            timestamp = int(time.time() * 1000)
             r = session.post(
-                "https://www.easyhits4u.com/surf/?ajax=1&try=1",
+                f"https://www.easyhits4u.com/surf/?ajax=1&try=1&_={timestamp}",
                 verify=False, timeout=REQUEST_TIMEOUT
             )
             if r.status_code != 200:
@@ -351,6 +362,26 @@ def surf_loop(api_key, initial_session):
 
             data = r.json()
             log(f"DEBUG risposta: {json.dumps(data, indent=2)[:500]}")
+
+            # Gestione redirect
+            if data.get("redirect"):
+                log(f"⚠️ Richiesta reindirizzata a {data['redirect']}")
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    log("❌ Troppi redirect consecutivi, esco")
+                    break
+                log("🔄 Tentativo di rilogin...")
+                new_session = do_login(api_key)
+                if new_session:
+                    session = new_session
+                    # Riavviamo la procedura di inizializzazione
+                    if not init_surf_session(session):
+                        log("❌ Re-inizializzazione fallita")
+                        break
+                    continue
+                else:
+                    log("❌ Rilogin fallito")
+                    break
 
             urlid = data.get("surfses", {}).get("urlid")
             qpic = data.get("surfses", {}).get("qpic")
@@ -427,7 +458,7 @@ def surf_loop(api_key, initial_session):
 # ================ MAIN =====================
 def main():
     log("="*50)
-    log("🚀 EasyHits4U Bot - Login + Autosurf (con init surf)")
+    log("🚀 EasyHits4U Bot - Login + Autosurf (con gestione redirect)")
     log("="*50)
 
     max_keys_to_try = 5
