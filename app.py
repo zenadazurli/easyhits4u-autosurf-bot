@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# app.py - Login BQL + Autosurf usando header Cookie manuale (come script locale)
+# app.py - Login BQL + Autosurf stile Divellaeasy
 
 import requests
 import json
@@ -12,7 +12,7 @@ import gc
 from datetime import datetime
 from datasets import load_dataset
 
-# ==================== CONFIGURAZIONE ====================
+# ==================== CONFIG ====================
 DIM = 64
 REQUEST_TIMEOUT = 15
 ERRORI_DIR = "/tmp/errori"
@@ -23,7 +23,7 @@ EASYHITS_PASSWORD = "DDnmVV45!!"
 REFERER_URL = "https://www.easyhits4u.com/?ref=nicolacaporale"
 BROWSERLESS_URL = "https://production-sfo.browserless.io/chrome/bql"
 
-# ==================== CHIAVI VALIDE (quelle che funzionano) ====================
+# Chiavi valide (quelle che funzionano nel login semplice)
 VALID_KEYS = [
     "2UFyHOdxsID23VMa0518a22c6b683ea3c11c1bdca148d5381",
     "2UIAf0U41Twctlr77ecbfa2545692634758496b2eb88a170c",
@@ -95,7 +95,7 @@ vector_dim = 33
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ==================== LOGIN BQL ====================
+# ==================== LOGIN BQL (solo per ottenere i cookie) ====================
 def get_cf_token(api_key):
     query = """
     mutation {
@@ -128,7 +128,7 @@ def get_cf_token(api_key):
         log(f"   ❌ Errore: {e}")
         return None
 
-def login_and_get_cookie_string(api_key):
+def login_and_get_cookies(api_key):
     token = get_cf_token(api_key)
     if not token:
         return None
@@ -148,14 +148,15 @@ def login_and_get_cookie_string(api_key):
         'cf-turnstile-response': token,
     }
     session.get(REFERER_URL)
-    response = session.post("https://www.easyhits4u.com/logon/", data=data, headers=headers, allow_redirects=True, timeout=30)
-    cookies = session.cookies.get_dict()
-    if 'user_id' in cookies and 'sesids' in cookies:
-        cookie_str = f"sesids={cookies['sesids']}; user_id={cookies['user_id']}"
-        log(f"   ✅ Login OK! Cookie string: {cookie_str}")
+    resp = session.post("https://www.easyhits4u.com/logon/", data=data, headers=headers, allow_redirects=True, timeout=30)
+    final_cookies = session.cookies.get_dict()
+    if 'user_id' in final_cookies and 'sesids' in final_cookies:
+        log(f"   ✅ Login OK! user_id={final_cookies['user_id']}, sesids={final_cookies['sesids']}")
+        # Restituisci la stringa cookie nel formato "sesids=...; user_id=..."
+        cookie_str = f"sesids={final_cookies['sesids']}; user_id={final_cookies['user_id']}"
         return cookie_str
     else:
-        log(f"   ❌ Cookie mancanti: {cookies}")
+        log(f"   ❌ Cookie mancanti: user_id={final_cookies.get('user_id')}, sesids={final_cookies.get('sesids')}")
         return None
 
 # ==================== DATASET ====================
@@ -184,7 +185,7 @@ def load_dataset_hf():
         log(f"❌ Errore dataset: {e}")
         return False
 
-# ==================== FUNZIONI DI RICONOSCIMENTO (adattate dallo script locale) ====================
+# ==================== FUNZIONI DI RICONOSCIMENTO (stile Divellaeasy) ====================
 def centra_figura(img):
     if img is None or img.size == 0:
         return cv2.resize(np.full((DIM, DIM, 3), 255, dtype=np.uint8), (DIM, DIM))
@@ -241,24 +242,14 @@ def estrai_descrittori(img):
     vec = np.array(radiale + spaziale + [circularity, aspect_ratio] + hu, dtype=float)
     return vec
 
-def predici_label_by_vector(v):
-    global X_fast, y_fast, classes_fast
-    if X_fast is None:
-        return None
-    try:
-        dif = X_fast - v
-        dists = np.einsum('ij,ij->i', dif, dif)
-        idx = int(np.argmin(dists))
-        lab_idx = int(y_fast[idx])
-        return classes_fast.get(lab_idx, str(lab_idx))
-    except:
-        return None
-
-def predici(img_crop):
+def predict(img_crop):
     if img_crop is None or img_crop.size == 0:
         return None
-    v = estrai_descrittori(img_crop)
-    return predici_label_by_vector(v)
+    features = estrai_descrittori(img_crop).astype(np.float32).reshape(1, -1)
+    distances, indices = faiss_index.search(features, 1)
+    best_idx = indices[0][0]
+    true_label_idx = dataset['y'][best_idx]
+    return classes_fast.get(int(true_label_idx), "errore")
 
 def crop_safe(img, coords):
     try:
@@ -273,6 +264,50 @@ def crop_safe(img, coords):
     if x2 <= x1 or y2 <= y1:
         return None
     return img[y1:y2, x1:x2]
+
+def fallback_pixel_compare(crops):
+    norm = []
+    for c in crops:
+        if c is None or c.size == 0:
+            norm.append(None)
+        else:
+            centered = centra_figura(c)
+            resized = cv2.resize(centered, (DIM, DIM)).astype(np.float32)
+            norm.append(resized)
+    best = None
+    min_diff = float("inf")
+    n = len(norm)
+    for i in range(n):
+        if norm[i] is None:
+            continue
+        for j in range(i+1, n):
+            if norm[j] is None:
+                continue
+            diff = np.linalg.norm(norm[i].flatten() - norm[j].flatten())
+            if diff < min_diff:
+                min_diff = diff
+                best = (i, j)
+    if best and min_diff < 400.0:
+        return min(best)
+    return None
+
+def riconosci_5(img, picmap):
+    labels = []
+    crops = []
+    for p in picmap:
+        cr = crop_safe(img, p.get("coords", ""))
+        crops.append(cr)
+        lab = predict(cr)
+        labels.append(lab if lab is not None else "errore")
+    # matching per label
+    n = len(labels)
+    for i in range(n):
+        for j in range(i+1, n):
+            if labels[i] != "errore" and labels[i] == labels[j]:
+                return labels, i
+    # fallback
+    idx = fallback_pixel_compare(crops)
+    return labels, idx
 
 def salva_errore(qpic, img, picmap, labels, chosen_idx, motivo, urlid=None):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -297,24 +332,20 @@ def salva_errore(qpic, img, picmap, labels, chosen_idx, motivo, urlid=None):
         json.dump(metadata, f, indent=2)
     log(f"📁 Errore salvato in {folder}")
 
-# ==================== SURF LOOP (usando header Cookie manuale) ====================
+# ==================== SURF LOOP (stile Divellaeasy) ====================
 def surf_loop(cookie_str):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/148.0',
-        'Cookie': cookie_str,
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Referer': 'https://www.easyhits4u.com/surf/',
-        'X-Requested-With': 'XMLHttpRequest'
-    }
     session = requests.Session()
-    consecutive_failures = 0
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Cookie": cookie_str
+    }
     captcha_counter = 0
+    consecutive_failures = 0
 
     while True:
         try:
-            timestamp = int(time.time() * 1000)
             r = session.post(
-                f"https://www.easyhits4u.com/surf/?ajax=1&try=1&_={timestamp}",
+                "https://www.easyhits4u.com/surf/?ajax=1&try=1",
                 headers=headers, verify=False, timeout=REQUEST_TIMEOUT
             )
             if r.status_code != 200:
@@ -326,44 +357,30 @@ def surf_loop(cookie_str):
                 continue
 
             data = r.json()
-            if data.get("redirect"):
-                log(f"⚠️ Sessione scaduta (redirect a {data['redirect']})")
-                break
-
             urlid = data.get("surfses", {}).get("urlid")
             qpic = data.get("surfses", {}).get("qpic")
             seconds = int(data.get("surfses", {}).get("seconds", 20))
             picmap = data.get("picmap", [])
 
             if not urlid or not qpic or not picmap or len(picmap) < 5:
-                log("⚠️ Dati incompleti, riprovo tra 10 secondi")
+                log("⚠️ Dati incompleti, attendo...")
+                time.sleep(seconds)
                 consecutive_failures += 1
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                     break
-                time.sleep(10)
                 continue
 
             consecutive_failures = 0
 
-            # Scarica immagine del captcha
-            rimg = session.get(f"https://www.easyhits4u.com/simg/{qpic}.jpg", headers=headers, verify=False)
+            img_url = f"https://www.easyhits4u.com/simg/{qpic}.jpg"
+            rimg = session.get(img_url, verify=False)
             img = cv2.imdecode(np.frombuffer(rimg.content, np.uint8), cv2.IMREAD_COLOR)
-            crops = [crop_safe(img, p.get("coords", "")) for p in picmap]
-            labels = [predici(c) for c in crops]
+
+            labels, idx = riconosci_5(img, picmap)
             log(f"Labels: {labels}")
 
-            # Trova duplicato
-            seen = {}
-            chosen_idx = None
-            for i, label in enumerate(labels):
-                if label and label != "errore":
-                    if label in seen:
-                        chosen_idx = seen[label]
-                        break
-                    seen[label] = i
-
-            if chosen_idx is None:
-                log("❌ Nessun duplicato trovato")
+            if idx is None:
+                log("❌ Riconoscimento fallito → salvo errore")
                 salva_errore(qpic, img, picmap, labels, None, "nessun_duplicato", urlid)
                 consecutive_failures += 1
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
@@ -371,17 +388,18 @@ def surf_loop(cookie_str):
                 time.sleep(5)
                 continue
 
+            # Invio risposta
             time.sleep(seconds)
-            word = picmap[chosen_idx]["value"]
-            resp = session.get(
+            word = picmap[idx]["value"]
+            url = (
                 f"https://www.easyhits4u.com/surf/?f=surf&urlid={urlid}&surftype=2"
-                f"&ajax=1&word={word}&screen_width=1024&screen_height=768",
-                headers=headers, verify=False
+                f"&ajax=1&word={requests.utils.quote(word)}&screen_width=1024&screen_height=768"
             )
+            resp = session.get(url, headers=headers, verify=False)
             resp_json = resp.json()
             if resp_json.get("warning") == "wrong_choice":
                 log("❌ Wrong choice")
-                salva_errore(qpic, img, picmap, labels, chosen_idx, "wrong_choice", urlid)
+                salva_errore(qpic, img, picmap, labels, idx, "wrong_choice", urlid)
                 consecutive_failures += 1
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                     break
@@ -389,10 +407,9 @@ def surf_loop(cookie_str):
                 continue
 
             captcha_counter += 1
-            log(f"✅ OK - indice {chosen_idx} - Totale: {captcha_counter}")
+            log(f"✅ OK - indice {idx} - Totale: {captcha_counter}")
             if captcha_counter % 10 == 0:
                 gc.collect()
-                log("🧹 Garbage collection")
             time.sleep(2)
 
         except Exception as e:
@@ -407,17 +424,16 @@ def surf_loop(cookie_str):
 # ==================== MAIN ====================
 def main():
     log("=" * 50)
-    log("🚀 LOGIN + AUTOSURF (con header Cookie manuale)")
+    log("🚀 LOGIN BQL + AUTOSURF (stile Divellaeasy)")
     log("=" * 50)
-    
+
     if not load_dataset_hf():
         log("❌ Dataset non caricato")
         return
-    
+
     for api_key in VALID_KEYS:
         log(f"🔑 Tentativo con chiave: {api_key[:10]}...")
-        
-        cookie_str = login_and_get_cookie_string(api_key)
+        cookie_str = login_and_get_cookies(api_key)
         if cookie_str:
             log("✅ Login riuscito! Avvio surf loop...")
             surf_loop(cookie_str)
