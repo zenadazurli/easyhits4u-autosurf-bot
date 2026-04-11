@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# app.py - Login (identico al vecchio repo) + Autosurf
+# app.py - Login + Autosurf integrato (login quando serve)
 
 import os
 import time
@@ -26,7 +26,7 @@ EASYHITS_PASSWORD = "DDnmVV45!!"
 REFERER_URL = "https://www.easyhits4u.com/?ref=nicolacaporale"
 BROWSERLESS_URL = "https://production-sfo.browserless.io/chrome/bql"
 
-# ==================== CHIAVI CHE FUNZIONANO (vecchio set) ====================
+# ==================== CHIAVI CHE FUNZIONANO ====================
 VALID_KEYS = [
     "2UFyHOdxsID23VMa0518a22c6b683ea3c11c1bdca148d5381",
     "2UIAf0U41Twctlr77ecbfa2545692634758496b2eb88a170c",
@@ -96,7 +96,7 @@ faiss_index = None
 vector_dim = 33
 server_ready = False
 
-# ==================== HEALTH CHECK SERVER =====================
+# ==================== HEALTH CHECK =====================
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/health':
@@ -115,7 +115,7 @@ def run_health_server():
     try:
         server = HTTPServer(('0.0.0.0', HEALTH_CHECK_PORT), HealthHandler)
         server_ready = True
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🏥 Health check avviato su porta {HEALTH_CHECK_PORT}")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🏥 Health check su porta {HEALTH_CHECK_PORT}")
         server.serve_forever()
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Health check error: {e}")
@@ -131,7 +131,7 @@ while not server_ready and timeout > 0:
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ==================== LOGIN (IDENTICO AL VECCHIO REPOSITORY) ====================
+# ==================== LOGIN (IDENTICO AL VECCHIO REPO) ====================
 def get_cf_token(api_key):
     query = """
     mutation {
@@ -164,8 +164,12 @@ def get_cf_token(api_key):
         log(f"   ❌ Errore token: {e}")
         return None
 
-def login_with_token(token):
-    """ESATTAMENTE come nel vecchio repository di login"""
+def do_login(api_key):
+    """Esegue login esattamente come nel vecchio repository - restituisce la sessione"""
+    token = get_cf_token(api_key)
+    if not token:
+        return None
+    
     session = requests.Session()
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/148.0',
@@ -184,22 +188,34 @@ def login_with_token(token):
     session.get(REFERER_URL)
     response = session.post("https://www.easyhits4u.com/logon/", data=data, headers=headers, allow_redirects=True, timeout=30)
     final_cookies = session.cookies.get_dict()
-    if 'user_id' in final_cookies:
-        log(f"   ✅ Login OK! user_id={final_cookies['user_id']}, sesids={final_cookies.get('sesids', 'NON TROVATO')}")
+    
+    if 'user_id' in final_cookies and 'sesids' in final_cookies:
+        # Forza surftype=2
+        final_cookies['surftype'] = '2'
+        for k, v in final_cookies.items():
+            session.cookies.set(k, v)
+        log(f"   ✅ Login OK! user_id={final_cookies['user_id']}, sesids={final_cookies['sesids']}, surftype=2")
+        # Aggiungi header per AJAX
+        session.headers.update({
+            'Referer': 'https://www.easyhits4u.com/surf/',
+            'X-Requested-With': 'XMLHttpRequest'
+        })
         return session
-    return None
+    else:
+        log(f"   ❌ Cookie mancanti: {final_cookies}")
+        return None
 
-# ==================== DATASET HUGGING FACE ====================
+# ==================== DATASET ====================
 def load_dataset_hf():
     global dataset, classes_fast, faiss_index
-    log("📥 Caricamento dataset da Hugging Face Hub...")
+    log("📥 Caricamento dataset...")
     try:
         dataset = load_dataset("zenadazurli/easyhits4u-dataset", split="train", token=None)
         log(f"✅ Dataset caricato: {len(dataset)} vettori")
         class_names = dataset.features['y'].names
         classes_fast = {i: name for i, name in enumerate(class_names)}
         
-        log("🔧 Costruzione indice FAISS (FlatL2)...")
+        log("🔧 Costruzione indice FAISS...")
         index = faiss.IndexFlatL2(vector_dim)
         batch_size = 5000
         total = len(dataset)
@@ -207,8 +223,6 @@ def load_dataset_hf():
             batch = dataset[i:i+batch_size]
             X_batch = np.array(batch['X'], dtype=np.float32)
             index.add(X_batch)
-            if i % 50000 == 0:
-                log(f"   Aggiunti {len(X_batch)} vettori, totale {index.ntotal}/{total}")
         log(f"✅ Indice FAISS creato con {index.ntotal} vettori")
         faiss_index = index
         gc.collect()
@@ -217,7 +231,7 @@ def load_dataset_hf():
         log(f"❌ Errore dataset: {e}")
         return False
 
-# ==================== FUNZIONI DI FEATURE EXTRACTION ====================
+# ==================== FUNZIONI DI RICONOSCIMENTO ====================
 def centra_figura(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
@@ -226,7 +240,7 @@ def centra_figura(image):
         return cv2.resize(image, (DIM, DIM))
     cnt = max(contours, key=cv2.contourArea)
     x, y, w, h = cv2.boundingRect(cnt)
-    crop = image[y:y+h, x:x+w]
+    crop = image[y:y+h, x:x+w)
     return cv2.resize(crop, (DIM, DIM))
 
 def estrai_descrittori(img):
@@ -409,35 +423,34 @@ def surf_loop(session):
 # ==================== MAIN ====================
 def main():
     log("=" * 50)
-    log("🚀 LOGIN + AUTOSURF (identico al vecchio login)")
+    log("🚀 LOGIN + AUTOSURF INTEGRATO")
     log("=" * 50)
     
     if not load_dataset_hf():
         log("❌ Dataset non caricato")
         return
     
-    for api_key in VALID_KEYS:
+    # Indice per scorrere le chiavi
+    key_index = 0
+    total_keys = len(VALID_KEYS)
+    
+    while True:
+        api_key = VALID_KEYS[key_index % total_keys]
         log(f"🔑 Tentativo con chiave: {api_key[:10]}...")
         
-        token = get_cf_token(api_key)
-        if not token:
-            log(f"   ❌ Token non ottenuto")
-            continue
-        
-        session = login_with_token(token)
+        session = do_login(api_key)
         if session:
-            # Verifica che sesids sia presente
-            if 'sesids' in session.cookies.get_dict():
-                log("✅ Login riuscito con sesids! Avvio surf loop...")
-                surf_loop(session)
-                log("🔄 Surf loop terminato, provo altra chiave...")
-            else:
-                log("   ❌ sesids non trovato, riprovo con altra chiave")
-                continue
+            log("✅ Login riuscito! Avvio surf loop...")
+            surf_loop(session)
+            log("🔄 Surf loop terminato (sessione scaduta), riprovo il login...")
+            # Dopo la scadenza, prova la stessa chiave ancora una volta
+            continue
         else:
-            log(f"   ❌ Login fallito")
-
-    log("❌ Login fallito con tutte le chiavi")
+            log(f"   ❌ Login fallito, passo alla prossima chiave")
+            key_index += 1
+            if key_index >= total_keys:
+                key_index = 0
+            time.sleep(5)
 
 if __name__ == "__main__":
     main()
