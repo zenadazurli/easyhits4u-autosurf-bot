@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# app.py - Login + Autosurf integrato (login quando serve)
+# app.py - Login + Autosurf integrato (con fix per sesids)
 
 import os
 import time
@@ -26,7 +26,7 @@ EASYHITS_PASSWORD = "DDnmVV45!!"
 REFERER_URL = "https://www.easyhits4u.com/?ref=nicolacaporale"
 BROWSERLESS_URL = "https://production-sfo.browserless.io/chrome/bql"
 
-# ==================== CHIAVI CHE FUNZIONANO ====================
+# Chiavi funzionanti (le 60 originali)
 VALID_KEYS = [
     "2UFyHOdxsID23VMa0518a22c6b683ea3c11c1bdca148d5381",
     "2UIAf0U41Twctlr77ecbfa2545692634758496b2eb88a170c",
@@ -131,7 +131,7 @@ while not server_ready and timeout > 0:
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ==================== LOGIN (IDENTICO AL VECCHIO REPO) ====================
+# ==================== LOGIN ====================
 def get_cf_token(api_key):
     query = """
     mutation {
@@ -165,7 +165,6 @@ def get_cf_token(api_key):
         return None
 
 def do_login(api_key):
-    """Esegue login esattamente come nel vecchio repository - restituisce la sessione"""
     token = get_cf_token(api_key)
     if not token:
         return None
@@ -176,6 +175,12 @@ def do_login(api_key):
         'Content-Type': 'application/x-www-form-urlencoded',
         'Referer': REFERER_URL,
     }
+    
+    # 1. GET homepage per cookie iniziali
+    session.get("https://www.easyhits4u.com/", headers=headers, verify=False, timeout=15)
+    time.sleep(1)
+    
+    # 2. POST login
     data = {
         'manual': '1',
         'fb_id': '',
@@ -185,24 +190,27 @@ def do_login(api_key):
         'password': EASYHITS_PASSWORD,
         'cf-turnstile-response': token,
     }
-    session.get(REFERER_URL)
-    response = session.post("https://www.easyhits4u.com/logon/", data=data, headers=headers, allow_redirects=True, timeout=30)
-    final_cookies = session.cookies.get_dict()
+    session.post("https://www.easyhits4u.com/logon/", data=data, headers=headers, allow_redirects=True, timeout=30)
+    time.sleep(2)
     
-    if 'user_id' in final_cookies and 'sesids' in final_cookies:
+    # 3. GET member per attivare sesids
+    session.get("https://www.easyhits4u.com/member/", headers=headers, verify=False, timeout=15)
+    time.sleep(1)
+    
+    cookies = session.cookies.get_dict()
+    if 'user_id' in cookies and 'sesids' in cookies:
         # Forza surftype=2
-        final_cookies['surftype'] = '2'
-        for k, v in final_cookies.items():
+        cookies['surftype'] = '2'
+        for k, v in cookies.items():
             session.cookies.set(k, v)
-        log(f"   ✅ Login OK! user_id={final_cookies['user_id']}, sesids={final_cookies['sesids']}, surftype=2")
-        # Aggiungi header per AJAX
+        log(f"   ✅ Login OK! user_id={cookies['user_id']}, sesids={cookies['sesids']}, surftype=2")
         session.headers.update({
             'Referer': 'https://www.easyhits4u.com/surf/',
             'X-Requested-With': 'XMLHttpRequest'
         })
         return session
     else:
-        log(f"   ❌ Cookie mancanti: {final_cookies}")
+        log(f"   ❌ Cookie mancanti: {cookies}")
         return None
 
 # ==================== DATASET ====================
@@ -240,7 +248,8 @@ def centra_figura(image):
         return cv2.resize(image, (DIM, DIM))
     cnt = max(contours, key=cv2.contourArea)
     x, y, w, h = cv2.boundingRect(cnt)
-    crop = image[y:y+h, x:x+w)
+    # CORREZIONE: parentesi quadre chiuse correttamente
+    crop = image[y:y+h, x:x+w]
     return cv2.resize(crop, (DIM, DIM))
 
 def estrai_descrittori(img):
@@ -423,33 +432,29 @@ def surf_loop(session):
 # ==================== MAIN ====================
 def main():
     log("=" * 50)
-    log("🚀 LOGIN + AUTOSURF INTEGRATO")
+    log("🚀 LOGIN + AUTOSURF INTEGRATO (FIX SESSIONE)")
     log("=" * 50)
     
     if not load_dataset_hf():
         log("❌ Dataset non caricato")
         return
     
-    # Indice per scorrere le chiavi
     key_index = 0
     total_keys = len(VALID_KEYS)
     
     while True:
-        api_key = VALID_KEYS[key_index % total_keys]
+        api_key = VALID_KEYS[key_index]
         log(f"🔑 Tentativo con chiave: {api_key[:10]}...")
-        
         session = do_login(api_key)
         if session:
             log("✅ Login riuscito! Avvio surf loop...")
             surf_loop(session)
-            log("🔄 Surf loop terminato (sessione scaduta), riprovo il login...")
-            # Dopo la scadenza, prova la stessa chiave ancora una volta
+            log("🔄 Surf loop terminato (sessione scaduta), riprovo...")
+            # Non incrementare l'indice, riprova con la stessa chiave (potrebbe essere ancora valida)
             continue
         else:
             log(f"   ❌ Login fallito, passo alla prossima chiave")
-            key_index += 1
-            if key_index >= total_keys:
-                key_index = 0
+            key_index = (key_index + 1) % total_keys
             time.sleep(5)
 
 if __name__ == "__main__":
