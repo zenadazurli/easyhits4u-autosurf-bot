@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# app.py - Login + Autosurf per EasyHits4U con 225 chiavi Browserless e cookie completi
+# app.py - Login BQL + Autosurf (sequenza identica al vecchio login)
 
 import os
 import time
@@ -10,9 +10,9 @@ import requests
 import numpy as np
 import cv2
 import faiss
+import re
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from supabase import create_client
 from datasets import load_dataset
 
 # ==================== CONFIGURAZIONE ====================
@@ -20,17 +20,14 @@ DIM = 64
 REQUEST_TIMEOUT = 15
 ERRORI_DIR = "/tmp/errori"
 HEALTH_CHECK_PORT = int(os.environ.get('PORT', 10000))
-MAX_CONSECUTIVE_FAILURES = 5          # Fallimenti consecutivi prima di cambiare chiave
+MAX_CONSECUTIVE_FAILURES = 5
 
-# Credenziali EasyHits4U (aggiornate)
 EASYHITS_EMAIL = "sandrominori50+uiszuzoqatr@gmail.com"
 EASYHITS_PASSWORD = "DDnmVV45!!"
 REFERER_URL = "https://www.easyhits4u.com/?ref=nicolacaporale"
-
-# Browserless BQL endpoint
 BROWSERLESS_URL = "https://production-sfo.browserless.io/chrome/bql"
 
-# ==================== 225 CHIAVI VALIDE (testate il 2026-04-11) ====================
+# ==================== CHIAVI VALIDE ====================
 VALID_KEYS = [
     "2TPBw78eoqITsdsc25e9ff6270092838010c06b1652627c8f",
     "2UB2mJ8Pu4KvAwya658a33c2af825bbe2f707870ba088d746",
@@ -284,10 +281,10 @@ def run_health_server():
     try:
         server = HTTPServer(('0.0.0.0', HEALTH_CHECK_PORT), HealthHandler)
         server_ready = True
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🏥 Health check avviato su porta {HEALTH_CHECK_PORT}")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🏥 Health check server avviato sulla porta {HEALTH_CHECK_PORT}")
         server.serve_forever()
     except Exception as e:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Health check error: {e}")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ ERRORE health check: {e}")
         server_ready = False
 
 health_thread = threading.Thread(target=run_health_server, daemon=True)
@@ -305,12 +302,13 @@ def load_dataset_hf():
     global dataset, classes_fast, faiss_index
     log("📥 Caricamento dataset da Hugging Face Hub...")
     try:
+        from datasets import load_dataset
         dataset = load_dataset("zenadazurli/easyhits4u-dataset", split="train", token=None)
         log(f"✅ Dataset caricato: {len(dataset)} vettori")
         class_names = dataset.features['y'].names
         classes_fast = {i: name for i, name in enumerate(class_names)}
         
-        log("🔧 Costruzione indice FAISS (FlatL2)...")
+        log("🔧 Costruzione indice FAISS (FlatL2) incrementale...")
         index = faiss.IndexFlatL2(vector_dim)
         batch_size = 5000
         total = len(dataset)
@@ -318,8 +316,6 @@ def load_dataset_hf():
             batch = dataset[i:i+batch_size]
             X_batch = np.array(batch['X'], dtype=np.float32)
             index.add(X_batch)
-            if i % 50000 == 0:
-                log(f"   Aggiunti {len(X_batch)} vettori, totale {index.ntotal}/{total}")
         log(f"✅ Indice FAISS creato con {index.ntotal} vettori")
         faiss_index = index
         gc.collect()
@@ -425,7 +421,7 @@ def salva_errore(qpic, img, picmap, labels, chosen_idx, motivo, urlid=None):
         json.dump(metadata, f, indent=2)
     log(f"📁 Errore salvato in {folder}")
 
-# ==================== LOGIN BQL CON ACQUISIZIONE COMPLETA COOKIE ====================
+# ==================== LOGIN (esattamente come nel vecchio repo) ====================
 def get_cf_token(api_key):
     query = """
     mutation {
@@ -458,37 +454,23 @@ def get_cf_token(api_key):
         log(f"   ❌ Errore token: {e}")
         return None
 
-def do_login_and_get_session(api_key):
-    """Esegue login e navigazione per ottenere una sessione con cookie completi (surftype=2)"""
+def do_login(api_key):
+    """Esegue login ESATTAMENTE come nel vecchio repository, senza GET extra"""
     session = requests.Session()
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/148.0',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'it-IT,it;q=0.8,en-US;q=0.5,en;q=0.3',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Referer': REFERER_URL,
     }
     
-    # 1. GET homepage
-    log("   🌐 GET homepage...")
-    try:
-        home = session.get("https://www.easyhits4u.com/", headers=headers, verify=False, timeout=15)
-        log(f"      Homepage status: {home.status_code}")
-        time.sleep(1)
-    except Exception as e:
-        log(f"      ❌ Errore homepage: {e}")
-        return None
+    # GET iniziale per cookie (come nel vecchio repo)
+    session.get(REFERER_URL, headers=headers, verify=False, timeout=15)
+    time.sleep(1)
     
-    # 2. Ottieni token Turnstile
     token = get_cf_token(api_key)
     if not token:
         return None
     
-    # 3. POST login
-    login_headers = headers.copy()
-    login_headers['Content-Type'] = 'application/x-www-form-urlencoded'
-    login_headers['Referer'] = REFERER_URL
     data = {
         'manual': '1',
         'fb_id': '',
@@ -498,55 +480,20 @@ def do_login_and_get_session(api_key):
         'password': EASYHITS_PASSWORD,
         'cf-turnstile-response': token,
     }
-    try:
-        login_resp = session.post("https://www.easyhits4u.com/logon/", data=data, headers=login_headers, allow_redirects=True, timeout=30)
-        log(f"      Login POST status: {login_resp.status_code}")
-        time.sleep(1)
-    except Exception as e:
-        log(f"      ❌ Errore POST login: {e}")
-        return None
+    resp = session.post("https://www.easyhits4u.com/logon/", data=data, headers=headers, allow_redirects=True, timeout=30)
+    # Attendi che i cookie vengano impostati
+    time.sleep(2)
     
-    # 4. GET /member/
-    log("   🌐 GET /member/...")
-    try:
-        member = session.get("https://www.easyhits4u.com/member/", headers=headers, verify=False, timeout=15)
-        log(f"      Member status: {member.status_code}")
-        time.sleep(1)
-    except Exception as e:
-        log(f"      ❌ Errore member: {e}")
-        return None
-    
-    # 5. GET /surf/ (ottiene surftype)
-    log("   🌐 GET /surf/...")
-    try:
-        surf = session.get("https://www.easyhits4u.com/surf/", headers=headers, verify=False, timeout=15)
-        log(f"      Surf page status: {surf.status_code}")
-        time.sleep(1)
-    except Exception as e:
-        log(f"      ❌ Errore surf: {e}")
-        return None
-    
-    # 6. GET referer (opzionale)
-    log("   🌐 GET referer...")
-    try:
-        ref = session.get(REFERER_URL, headers=headers, verify=False, timeout=15)
-        log(f"      Referer status: {ref.status_code}")
-    except Exception as e:
-        log(f"      ⚠️ Errore referer (non bloccante): {e}")
-    
-    cookies_dict = session.cookies.get_dict()
-    log(f"   🍪 Cookie ottenuti: {list(cookies_dict.keys())}")
-    
-    if 'user_id' in cookies_dict and 'sesids' in cookies_dict:
-        # Forza surftype=2 se necessario
-        if 'surftype' in cookies_dict:
-            cookies_dict['surftype'] = '2'
+    cookies = session.cookies.get_dict()
+    if 'user_id' in cookies and 'sesids' in cookies:
+        log(f"   ✅ Login OK! user_id={cookies['user_id']}, sesids={cookies['sesids']}")
+        # Forza surftype=2 se presente, altrimenti aggiungilo
+        if 'surftype' in cookies:
+            cookies['surftype'] = '2'
         else:
-            cookies_dict['surftype'] = '2'
-        # Ricostruisci i cookie nella sessione
-        for k, v in cookies_dict.items():
+            cookies['surftype'] = '2'
+        for k, v in cookies.items():
             session.cookies.set(k, v)
-        log(f"   ✅ Login completo! user_id={cookies_dict['user_id']}, sesids={cookies_dict['sesids']}, surftype={cookies_dict.get('surftype')}")
         # Aggiungi header per AJAX
         session.headers.update({
             'Referer': 'https://www.easyhits4u.com/surf/',
@@ -554,13 +501,16 @@ def do_login_and_get_session(api_key):
         })
         return session
     else:
-        log(f"   ❌ Cookie essenziali mancanti: user_id={cookies_dict.get('user_id')}, sesids={cookies_dict.get('sesids')}")
+        log(f"   ❌ Cookie mancanti: {cookies}")
         return None
 
 # ==================== SURF LOOP ====================
 def surf_loop(session):
     consecutive_failures = 0
     captcha_counter = 0
+
+    # Opzionale: se il primo POST fallisce, prova a ottenere CSRF token
+    need_csrf = False
 
     while True:
         try:
@@ -577,9 +527,19 @@ def surf_loop(session):
                 continue
 
             data = r.json()
-            
             if data.get("redirect"):
                 log(f"⚠️ Sessione scaduta (redirect a {data['redirect']})")
+                # Se otteniamo redirect e non abbiamo ancora provato a ottenere CSRF, tentiamo
+                if not need_csrf:
+                    log("   🔄 Tentativo di ottenere CSRF token...")
+                    surf_page = session.get("https://www.easyhits4u.com/surf/", verify=False, timeout=15)
+                    match = re.search(r'name="csrf_token"\s+value="([^"]+)"', surf_page.text)
+                    if match:
+                        csrf = match.group(1)
+                        session.headers.update({'X-CSRF-Token': csrf})
+                        log(f"   ✅ CSRF token ottenuto: {csrf[:10]}...")
+                        need_csrf = True
+                        continue  # riprova subito
                 break
 
             urlid = data.get("surfses", {}).get("urlid")
@@ -657,7 +617,7 @@ def surf_loop(session):
 # ==================== MAIN ====================
 def main():
     log("=" * 50)
-    log("🚀 EasyHits4U Bot - Login + Autosurf (225 chiavi, cookie completi)")
+    log("🚀 LOGIN + AUTOSURF (sequenza identica al vecchio login)")
     log("=" * 50)
     
     if not load_dataset_hf():
@@ -666,18 +626,15 @@ def main():
     
     for api_key in VALID_KEYS:
         log(f"🔑 Tentativo con chiave: {api_key[:10]}...")
-        session = do_login_and_get_session(api_key)
+        session = do_login(api_key)
         if session:
             log("✅ Login riuscito! Avvio surf loop...")
             surf_loop(session)
-            log("🔄 Surf loop terminato (sessione scaduta), provo altra chiave...")
+            log("🔄 Surf loop terminato, provo altra chiave...")
         else:
             log(f"   ❌ Login fallito, passo alla prossima chiave")
     
-    log("❌ Nessuna chiave funzionante. Bot in attesa di riavvio...")
-    # Mantieni il bot vivo per health check
-    while True:
-        time.sleep(60)
+    log("❌ Nessuna chiave funzionante")
 
 if __name__ == "__main__":
     main()
